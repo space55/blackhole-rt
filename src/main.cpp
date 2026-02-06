@@ -29,11 +29,15 @@ int main()
     const double base_dt = 0.1;
     const double max_affine = 100.0;
     const double escape_r2 = 2500.0; // r=50, where H~0.0004 (negligible curvature)
+    const double fov_x = 360.0;
+    const double fov_y = 180.0;
 
     std::vector<BH_COLOR_CHANNEL_TYPE> pixels(static_cast<size_t>(out_width) * static_cast<size_t>(out_height) * 3);
 
     const int total_pixels = out_width * out_height;
     std::atomic<int> pixels_done(0);
+
+    const double r_plus = ray_s::event_horizon_radius();
 
 #pragma omp parallel for schedule(dynamic, 1)
     for (int y = 0; y < out_height; ++y)
@@ -43,19 +47,25 @@ int main()
             bool hit_black_hole = false;
             const int idx = y * out_width + x;
 
-            ray_s ray(Vector3d(-15, 0, 0),
-                      Vector3d(0, 90, 0),
+            ray_s ray(Vector3d(-15, 2, 0),
+                      Vector3d(15, 80, 10),
                       (static_cast<double>(x) / out_width),
                       (static_cast<double>(y) / out_height),
-                      60.0,
-                      30.0);
+                      fov_x,
+                      fov_y);
 
             double affine = 0.0;
             while (affine < max_affine)
             {
-                const double r2 = ray.distance_from_origin_squared();
-                const double step_dt = base_dt * std::clamp(r2 / 25.0, 0.01, 1.0);
-                ray.advance(step_dt);
+                // Use Kerr-Schild radius for step sizing
+                const double r_ks = ray.kerr_radius();
+                const double delta = std::max(r_ks - r_plus, 0.01);
+                const double step_dt = base_dt * std::clamp(delta * delta, 0.0001, 1.0);
+                if (!ray.advance(step_dt))
+                {
+                    hit_black_hole = true;
+                    break;
+                }
                 affine += step_dt;
                 if (ray.has_crossed_event_horizon() || !std::isfinite(ray.vel.squaredNorm()))
                 {

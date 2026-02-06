@@ -7,8 +7,7 @@
 namespace
 {
     constexpr double kBlackHoleMass = 1.0;
-    constexpr double kBlackHoleSpin = 0.8;
-    constexpr double kMetricEps = 1e-4;
+    constexpr double kBlackHoleSpin = 0.99;
 
     struct MetricResult
     {
@@ -89,13 +88,90 @@ namespace
 
     static void metric_partials(const Vector3d &pos, double mass, double spin, Matrix4d partials[3])
     {
+        const double x = pos.x();
+        const double y = pos.y();
+        const double z = pos.z();
+        const double a = spin;
+        const double a2 = a * a;
+
+        const double r = kerr_schild_radius(x, y, z, a);
+        const double r2 = r * r;
+        const double r3 = r2 * r;
+        const double P = r2 + a2;
+        const double P2 = P * P;
+        // Sigma = r^2 + a^2*y^2/r^2  (spin axis along y)
+        const double Sigma = r2 + a2 * y * y / r2;
+        const double Sigma2 = Sigma * Sigma;
+
+        // Null vector components
+        const double lx = (r * x + a * z) / P;
+        const double ly = y / r;
+        const double lz = (r * z - a * x) / P;
+        Vector4d l;
+        l << 1.0, lx, ly, lz;
+
+        // H = M*r / Sigma
+        const double H = mass * r / Sigma;
+
+        // dr/dx_i  (implicit differentiation of r^4 - (rho^2-a^2)*r^2 - a^2*y^2 = 0)
+        const double dr[3] = {
+            x * r / Sigma,       // dr/dx
+            y * P / (r * Sigma), // dr/dy
+            z * r / Sigma        // dr/dz
+        };
+
+        // dSigma/dx_i
+        const double sig_r_coeff = 2.0 * r - 2.0 * a2 * y * y / r3;
+        double dSigma[3];
+        for (int i = 0; i < 3; ++i)
+            dSigma[i] = sig_r_coeff * dr[i];
+        dSigma[1] += 2.0 * a2 * y / r2;
+
+        // dH/dx_i = M * (dr_i * Sigma - r * dSigma_i) / Sigma^2
+        double dH[3];
+        for (int i = 0; i < 3; ++i)
+            dH[i] = mass * (dr[i] * Sigma - r * dSigma[i]) / Sigma2;
+
+        // dlx/dx_i :  lx = (r*x + a*z) / P
+        double dlx[3];
         for (int i = 0; i < 3; ++i)
         {
-            Vector3d step = Vector3d::Zero();
-            step[i] = kMetricEps;
-            Matrix4d g_plus = kerr_schild_metric(pos + step, mass, spin).g;
-            Matrix4d g_minus = kerr_schild_metric(pos - step, mass, spin).g;
-            partials[i] = (g_plus - g_minus) / (2.0 * kMetricEps);
+            double num = dr[i] * x;
+            if (i == 0)
+                num += r;
+            if (i == 2)
+                num += a;
+            dlx[i] = (num * P - (r * x + a * z) * 2.0 * r * dr[i]) / P2;
+        }
+
+        // dly/dx_i :  ly = y / r
+        double dly[3];
+        for (int i = 0; i < 3; ++i)
+        {
+            double num = -y * dr[i];
+            if (i == 1)
+                num += r;
+            dly[i] = num / r2;
+        }
+
+        // dlz/dx_i :  lz = (r*z - a*x) / P
+        double dlz[3];
+        for (int i = 0; i < 3; ++i)
+        {
+            double num = dr[i] * z;
+            if (i == 2)
+                num += r;
+            if (i == 0)
+                num -= a;
+            dlz[i] = (num * P - (r * z - a * x) * 2.0 * r * dr[i]) / P2;
+        }
+
+        // Assemble: dg[i] = 2*dH[i]*l*l^T + 2*H*(dl_i*l^T + l*dl_i^T)
+        for (int i = 0; i < 3; ++i)
+        {
+            Vector4d dl_i;
+            dl_i << 0.0, dlx[i], dly[i], dlz[i];
+            partials[i] = 2.0 * dH[i] * (l * l.transpose()) + 2.0 * H * (dl_i * l.transpose() + l * dl_i.transpose());
         }
     }
 
@@ -185,15 +261,22 @@ double ray_s::distance_from_origin_squared() const
 bool ray_s::has_crossed_event_horizon() const
 {
     const double r = kerr_schild_radius(pos.x(), pos.y(), pos.z(), kBlackHoleSpin);
-    const double mass = kBlackHoleMass;
-    const double spin = kBlackHoleSpin;
-    const double r_plus = mass + sqrt(std::max(mass * mass - spin * spin, 0.0));
-    // Small buffer catches rays in the numerically unstable zone
-    // just outside the horizon where finite-difference Christoffels blow up
-    return r <= r_plus * 1.02;
+    return r <= event_horizon_radius();
 }
 
-void ray_s::advance(double dt)
+double ray_s::kerr_radius() const
+{
+    return kerr_schild_radius(pos.x(), pos.y(), pos.z(), kBlackHoleSpin);
+}
+
+double ray_s::event_horizon_radius()
+{
+    const double mass = kBlackHoleMass;
+    const double spin = kBlackHoleSpin;
+    return mass + sqrt(std::max(mass * mass - spin * spin, 0.0));
+}
+
+bool ray_s::advance(double dt)
 {
     struct Deriv
     {
@@ -201,21 +284,39 @@ void ray_s::advance(double dt)
         Vector3d dv;
     };
 
-    auto deriv = [&](const Vector3d &x, const Vector3d &v) -> Deriv
+    const double r_plus = event_horizon_radius();
+
+    auto deriv = [&](const Vector3d &x, const Vector3d &v, bool &inside) -> Deriv
     {
+        const double r_ks = kerr_schild_radius(x.x(), x.y(), x.z(), kBlackHoleSpin);
+        if (r_ks <= r_plus)
+        {
+            inside = true;
+            return {Vector3d::Zero(), Vector3d::Zero()};
+        }
         Deriv d;
         d.dx = v;
         d.dv = geodesic_accel(x, v, kBlackHoleMass, kBlackHoleSpin);
         return d;
     };
 
-    const Deriv k1 = deriv(pos, vel);
-    const Deriv k2 = deriv(pos + 0.5 * dt * k1.dx, vel + 0.5 * dt * k1.dv);
-    const Deriv k3 = deriv(pos + 0.5 * dt * k2.dx, vel + 0.5 * dt * k2.dv);
-    const Deriv k4 = deriv(pos + dt * k3.dx, vel + dt * k3.dv);
+    bool inside = false;
+    const Deriv k1 = deriv(pos, vel, inside);
+    if (inside)
+        return false;
+    const Deriv k2 = deriv(pos + 0.5 * dt * k1.dx, vel + 0.5 * dt * k1.dv, inside);
+    if (inside)
+        return false;
+    const Deriv k3 = deriv(pos + 0.5 * dt * k2.dx, vel + 0.5 * dt * k2.dv, inside);
+    if (inside)
+        return false;
+    const Deriv k4 = deriv(pos + dt * k3.dx, vel + dt * k3.dv, inside);
+    if (inside)
+        return false;
 
     pos += (dt / 6.0) * (k1.dx + 2.0 * k2.dx + 2.0 * k3.dx + k4.dx);
     vel += (dt / 6.0) * (k1.dv + 2.0 * k2.dv + 2.0 * k3.dv + k4.dv);
+    return true;
 }
 
 Vector3d ray_s::project_to_sky(sky_image_s &sky)
@@ -223,7 +324,7 @@ Vector3d ray_s::project_to_sky(sky_image_s &sky)
     // This is sure as hell to cause an issue if the ray is pointing through a black hole. Come back to this.
     Vector3d dir_normalized = vel.normalized();
 
-    double u = 0.5 + (atan2(dir_normalized.z(), dir_normalized.x()) / (2.0 * M_PI));
+    double u = 0.5 - (atan2(dir_normalized.z(), dir_normalized.x()) / (2.0 * M_PI));
     double v = 0.5 - (asin(dir_normalized.y()) / M_PI);
 
     int x = std::clamp(static_cast<int>(u * sky.width), 0, sky.width - 1);
