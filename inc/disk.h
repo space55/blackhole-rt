@@ -39,8 +39,10 @@ struct accretion_disk_s
     // Temperature at a point (Novikov-Thorne-like profile)
     double temperature(const Vector3d &pos) const;
 
-    // Thermal emissivity as RGB (blackbody-ish color from temperature)
-    Vector3d emissivity(const Vector3d &pos) const;
+    // Thermal emissivity as RGB (blackbody-ish color from temperature).
+    // If alpha_out is non-null, also outputs absorption coefficient (= opacity0 * density)
+    // to avoid a redundant density recomputation when both are needed.
+    Vector3d emissivity(const Vector3d &pos, double *alpha_out = nullptr) const;
 
     // Absorption coefficient at a point
     double absorption(const Vector3d &pos) const;

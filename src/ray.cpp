@@ -75,45 +75,71 @@ double ray_s::kerr_radius() const
 // ---------------------------------------------------------------------------
 bool ray_s::advance(double dt)
 {
-    struct Deriv
-    {
-        Vector3d dx;
-        Vector3d dv;
-    };
-
     const double r_plus = bh->event_horizon_radius();
 
-    // Fused horizon check + geodesic acceleration: geodesic_accel
-    // already computes the KS radius internally, so we retrieve it
-    // via out_ks_r instead of calling ks_radius() a second time.
-    auto deriv = [&](const Vector3d &x, const Vector3d &v, bool &inside) -> Deriv
+    if (cached_ks_r > 4.0 * r_plus)
     {
-        double r;
-        Vector3d accel = bh->geodesic_accel(x, v, &r);
-        if (r <= r_plus)
+        // ---------------------------------------------------------------
+        // Far-field: RK2 midpoint method (2 geodesic_accel evaluations
+        // instead of 4).  Curvature is weak at large r so 2nd-order
+        // accuracy is sufficient; this halves the work for ~70% of steps.
+        // ---------------------------------------------------------------
+        double r1;
+        Vector3d a1 = bh->geodesic_accel(pos, vel, &r1);
+        if (r1 <= r_plus)
+            return false;
+
+        Vector3d mid_pos = pos + 0.5 * dt * vel;
+        Vector3d mid_vel = vel + 0.5 * dt * a1;
+
+        double r2;
+        Vector3d a2 = bh->geodesic_accel(mid_pos, mid_vel, &r2);
+        if (r2 <= r_plus)
+            return false;
+
+        pos += dt * mid_vel;
+        vel += dt * a2;
+    }
+    else
+    {
+        // ---------------------------------------------------------------
+        // Near-field: full RK4 for accuracy near strong curvature
+        // ---------------------------------------------------------------
+        struct Deriv
         {
-            inside = true;
-            return {Vector3d::Zero(), Vector3d::Zero()};
-        }
-        return {v, accel};
-    };
+            Vector3d dx;
+            Vector3d dv;
+        };
 
-    bool inside = false;
-    const Deriv k1 = deriv(pos, vel, inside);
-    if (inside)
-        return false;
-    const Deriv k2 = deriv(pos + 0.5 * dt * k1.dx, vel + 0.5 * dt * k1.dv, inside);
-    if (inside)
-        return false;
-    const Deriv k3 = deriv(pos + 0.5 * dt * k2.dx, vel + 0.5 * dt * k2.dv, inside);
-    if (inside)
-        return false;
-    const Deriv k4 = deriv(pos + dt * k3.dx, vel + dt * k3.dv, inside);
-    if (inside)
-        return false;
+        auto deriv = [&](const Vector3d &x, const Vector3d &v, bool &inside) -> Deriv
+        {
+            double r;
+            Vector3d accel = bh->geodesic_accel(x, v, &r);
+            if (r <= r_plus)
+            {
+                inside = true;
+                return {Vector3d::Zero(), Vector3d::Zero()};
+            }
+            return {v, accel};
+        };
 
-    pos += (dt / 6.0) * (k1.dx + 2.0 * k2.dx + 2.0 * k3.dx + k4.dx);
-    vel += (dt / 6.0) * (k1.dv + 2.0 * k2.dv + 2.0 * k3.dv + k4.dv);
+        bool inside = false;
+        const Deriv k1 = deriv(pos, vel, inside);
+        if (inside)
+            return false;
+        const Deriv k2 = deriv(pos + 0.5 * dt * k1.dx, vel + 0.5 * dt * k1.dv, inside);
+        if (inside)
+            return false;
+        const Deriv k3 = deriv(pos + 0.5 * dt * k2.dx, vel + 0.5 * dt * k2.dv, inside);
+        if (inside)
+            return false;
+        const Deriv k4 = deriv(pos + dt * k3.dx, vel + dt * k3.dv, inside);
+        if (inside)
+            return false;
+
+        pos += (dt / 6.0) * (k1.dx + 2.0 * k2.dx + 2.0 * k3.dx + k4.dx);
+        vel += (dt / 6.0) * (k1.dv + 2.0 * k2.dv + 2.0 * k3.dv + k4.dv);
+    }
 
     // Cache the KS radius at the updated position for the main render loop
     cached_ks_r = bh->ks_radius(pos);
@@ -131,15 +157,26 @@ void ray_s::sample_disk(const accretion_disk_s &disk, double ds)
     if (!disk.contains(pos))
         return;
 
-    const Vector3d j = disk.emissivity(pos);
-    const double alpha = disk.absorption(pos);
+    // Compute emissivity + absorption together (one density() call instead of two)
+    double alpha;
+    const Vector3d j = disk.emissivity(pos, &alpha);
 
-    const double u0 = bh->compute_u0_null(pos, vel);
-    const Vector4d photon_k(u0, vel.x(), vel.y(), vel.z());
-
-    const Vector4d gas_u = disk.gas_four_velocity(pos);
-
+    // Compute metric once — shared by u0 solve and redshift calculation
     const MetricResult m = bh->metric(pos);
+
+    // Inline u0 from null condition (avoids second metric() inside compute_u0_null)
+    const double v1 = vel.x(), v2 = vel.y(), v3 = vel.z();
+    const double b_u0 = 2.0 * (m.g(0, 1) * v1 + m.g(0, 2) * v2 + m.g(0, 3) * v3);
+    const double c_u0 = m.g(1, 1) * v1 * v1 + m.g(2, 2) * v2 * v2 + m.g(3, 3) * v3 * v3 + 2.0 * (m.g(1, 2) * v1 * v2 + m.g(1, 3) * v1 * v3 + m.g(2, 3) * v2 * v3);
+    const double disc_u0 = b_u0 * b_u0 - 4.0 * m.g(0, 0) * c_u0;
+    const double sqrt_disc = sqrt(std::max(disc_u0, 0.0));
+    const double inv_2g00 = 0.5 / m.g(0, 0);
+    const double u0a = (-b_u0 + sqrt_disc) * inv_2g00;
+    const double u0b = (-b_u0 - sqrt_disc) * inv_2g00;
+    const double u0 = (u0a < 0.0) ? u0a : u0b;
+
+    const Vector4d photon_k(u0, v1, v2, v3);
+    const Vector4d gas_u = disk.gas_four_velocity(pos);
     const double g = accretion_disk_s::redshift_factor(photon_k, gas_u, m.g);
 
     const double g_clamped = std::clamp(g, 0.01, 10.0);

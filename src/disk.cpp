@@ -299,9 +299,11 @@ Vector3d accretion_disk_s::temperature_to_rgb(double T)
 //   color_variation = 0.0 → physically based (temperature color only)
 //   color_variation = 1.0 → full cinematic (azimuthal & radial hue shifts)
 // ---------------------------------------------------------------------------
-Vector3d accretion_disk_s::emissivity(const Vector3d &pos) const
+Vector3d accretion_disk_s::emissivity(const Vector3d &pos, double *alpha_out) const
 {
     const double rho = density(pos);
+    if (alpha_out)
+        *alpha_out = opacity0 * rho;
     if (rho < 1e-12)
         return Vector3d(0, 0, 0);
 
