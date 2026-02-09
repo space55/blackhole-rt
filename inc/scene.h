@@ -45,6 +45,7 @@ struct scene_config_s
     // Accretion disk appearance
     double disk_emission_boost = 10.0;
     double disk_color_variation = 0.7;
+    double disk_turbulence = 0.0;
 
     // Tone mapping
     double tonemap_compression = 1.0;

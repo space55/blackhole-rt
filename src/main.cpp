@@ -65,6 +65,7 @@ int main(int argc, char *argv[])
                           cfg.disk_density, cfg.disk_opacity);
     disk.emission_boost = cfg.disk_emission_boost;
     disk.color_variation = cfg.disk_color_variation;
+    disk.turbulence = cfg.disk_turbulence;
 
     // --- Tone mapping ----------------------------------------------------
     const double disk_tonemap_compression = cfg.tonemap_compression;

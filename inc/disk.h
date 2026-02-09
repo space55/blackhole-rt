@@ -15,12 +15,16 @@ struct accretion_disk_s
     double opacity0;              // Base opacity scale (absorption per unit density)
     double emission_boost = 1.0;  // Multiplier for visual brightness (does not affect opacity)
     double color_variation = 0.0; // 0 = physically accurate, 1 = full cinematic color palette
+    double turbulence = 0.0;      // 0 = smooth uniform disk, 1 = torn-apart debris ring
 
     // Construct with ISCO as default inner radius
     accretion_disk_s(const blackhole_s *black_hole, double r_outer, double h, double rho0, double kappa0);
 
     // Disk half-thickness at a given KS radius (flared disk: h ~ r)
     double half_thickness(double r_ks) const;
+
+    // Turbulence-warped half-thickness at a 3D position (azimuthal lumps & gaps)
+    double warped_half_thickness(const Vector3d &pos) const;
 
     // Is this Cartesian point inside the disk volume?
     bool contains(const Vector3d &pos) const;

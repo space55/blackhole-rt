@@ -43,6 +43,7 @@ disk_opacity    = 0.5           # absorption per unit density κ₀
 # --- Accretion disk appearance ----------------------------------------------
 disk_emission_boost   = 10.0    # brightness multiplier (does not affect opacity)
 disk_color_variation  = 0.7     # 0 = physically accurate, 1 = full cinematic colour
+disk_turbulence       = 0.8     # 0 = smooth uniform disk, 1 = torn-apart debris ring
 
 # --- Tone mapping -----------------------------------------------------------
 # Inverse-logarithmic compression applied to disk emission.

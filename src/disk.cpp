@@ -25,6 +25,52 @@ double accretion_disk_s::half_thickness(double r_ks) const
 }
 
 // ---------------------------------------------------------------------------
+// Turbulence-warped half-thickness: azimuthal lumps, gaps, and warps
+// Creates a debris-ring look where some directions are thick/puffy and
+// others are nearly absent — like a planet was ripped apart.
+// ---------------------------------------------------------------------------
+double accretion_disk_s::warped_half_thickness(const Vector3d &pos) const
+{
+    const double r_ks = bh->ks_radius(pos);
+    const double h0 = half_thickness(std::min(r_ks, outer_r));
+
+    if (turbulence < 1e-6)
+        return h0;
+
+    const double x = pos.x(), z = pos.z();
+    const double phi = atan2(z, x);
+    const double log_r = log(std::max(r_ks, 1e-6));
+    const double t = turbulence;
+
+    // Large-scale azimuthal lumps (2-3 dominant thick/thin regions)
+    double warp = 0.0;
+    warp += 0.55 * sin(2.0 * phi - 3.0 * log_r + 1.2);
+    warp += 0.35 * sin(3.0 * phi - 5.0 * log_r + 4.1);
+
+    // Medium-scale: turbulent puffiness variations
+    warp += 0.25 * sin(5.0 * phi - 9.0 * log_r + 0.7);
+    warp += 0.18 * sin(7.0 * phi - 11.0 * log_r + 2.9);
+
+    // Fine-scale: small billows and wisps
+    warp += 0.12 * sin(11.0 * phi - 17.0 * log_r + 5.3);
+    warp += 0.08 * sin(17.0 * phi - 23.0 * log_r + 3.1);
+
+    // Narrow gaps / tears in the disk (sharp dips)
+    auto dip = [](double phase, double sharpness) -> double
+    {
+        double s = sin(phase);
+        return pow(s * s, sharpness);
+    };
+    warp -= 0.70 * dip(3.0 * phi - 4.0 * log_r + 2.5, 4.0);
+    warp -= 0.40 * dip(5.0 * phi - 8.0 * log_r + 0.3, 5.0);
+
+    // Apply: factor range from near-zero (gap) to ~2x (puffy clump)
+    // At turbulence=1, full effect; at turbulence=0.5, half effect
+    const double factor = 1.0 + t * warp;
+    return h0 * std::max(factor, 0.05);
+}
+
+// ---------------------------------------------------------------------------
 // Is this point inside the disk volume?
 // ---------------------------------------------------------------------------
 bool accretion_disk_s::contains(const Vector3d &pos) const
@@ -35,7 +81,7 @@ bool accretion_disk_s::contains(const Vector3d &pos) const
     if (r_ks < inner_r || r_ks > fade_limit)
         return false;
 
-    const double h = half_thickness(std::min(r_ks, outer_r));
+    const double h = warped_half_thickness(pos);
     const double height = fabs(pos.y());
     return height <= 3.0 * h;
 }
@@ -65,7 +111,7 @@ double accretion_disk_s::clump_factor(const Vector3d &pos) const
     // are coherent *along the orbital plane* (horizontal from the side).
     // Physically: turbulent eddies at different heights are at different
     // azimuthal phases due to vertical shear.
-    const double h = half_thickness(r_ks);
+    const double h = warped_half_thickness(pos);
     const double y_over_h = (h > 1e-12) ? (y / h) : 0.0;
     // Large tilt so the pattern is clearly horizontal, not vertical
     const double y_phase = 3.0 * y_over_h;
@@ -132,7 +178,7 @@ double accretion_disk_s::density(const Vector3d &pos) const
     if (r_ks < inner_r || r_ks > fade_limit)
         return 0.0;
 
-    const double h = half_thickness(std::min(r_ks, outer_r));
+    const double h = warped_half_thickness(pos);
     if (h < 1e-12)
         return 0.0;
 
@@ -269,16 +315,39 @@ Vector3d accretion_disk_s::emissivity(const Vector3d &pos) const
         // Spiral-following so colour bands align with the streak pattern
         const double hue = 0.6 * sin(2.0 * phi - 4.5 * log_r + 0.5) + 0.4 * sin(3.0 * phi - 7.0 * log_r + 2.1) + 0.3 * cos(5.0 * phi - 10.0 * log_r + 1.7);
 
+        // Secondary hue axis — orthogonal variation for richer palette
+        const double hue2 = 0.5 * sin(4.0 * phi - 6.0 * log_r + 3.3) + 0.3 * cos(7.0 * phi - 12.0 * log_r + 0.9);
+
         // Radial colour gradient: inner = blue-white boost, outer = deep amber
         const double radial_hue = 1.0 - 2.0 * r_norm; // +1 inner, -1 outer
 
-        // Combined tint offsets for each channel
-        // Red:   boosted at outer radii and in "warm" spiral bands
-        // Green: slight modulation for gold/amber richness
-        // Blue:  boosted at inner radii and in "cool" spiral bands
-        const double dr = cv * (0.15 * (-radial_hue) + 0.12 * hue);
-        const double dg = cv * (0.08 * hue * radial_hue);
-        const double db = cv * (0.20 * radial_hue + 0.10 * (-hue));
+        // Debris composition bands — some streaks are metal (blue-steel),
+        // some are rocky (ochre/brown), some are icy (cyan), some are
+        // molten (deep orange/magenta).  hue2 drives the "material type".
+        const double mat = 0.5 + 0.5 * hue2; // 0..1 material selector
+
+        double dr = 0.0, dg = 0.0, db = 0.0;
+
+        // Base radial + spiral tint (same as before but stronger)
+        dr += cv * (0.20 * (-radial_hue) + 0.15 * hue);
+        dg += cv * (0.10 * hue * radial_hue);
+        db += cv * (0.25 * radial_hue + 0.12 * (-hue));
+
+        // Material-type color shifts
+        // Molten/magenta streaks (mat near 0)
+        dr += cv * 0.18 * (1.0 - mat) * (0.5 + 0.5 * hue);
+        db += cv * 0.12 * (1.0 - mat) * (0.5 + 0.5 * hue);
+
+        // Cyan/ice streaks (mat near 0.5)
+        const double ice = exp(-8.0 * (mat - 0.5) * (mat - 0.5));
+        dg += cv * 0.20 * ice;
+        db += cv * 0.25 * ice;
+        dr -= cv * 0.10 * ice;
+
+        // Ochre/brown rocky debris (mat near 1)
+        dr += cv * 0.15 * mat * (0.5 - 0.5 * hue);
+        dg += cv * 0.06 * mat;
+        db -= cv * 0.12 * mat;
 
         color.x() = std::clamp(color.x() + dr, 0.0, 1.0);
         color.y() = std::clamp(color.y() + dg, 0.0, 1.0);

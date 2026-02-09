@@ -110,6 +110,7 @@ bool load_scene_config(const char *path, scene_config_s &cfg)
     // Disk appearance
     get_double("disk_emission_boost", cfg.disk_emission_boost);
     get_double("disk_color_variation", cfg.disk_color_variation);
+    get_double("disk_turbulence", cfg.disk_turbulence);
 
     // Tone mapping
     get_double("tonemap_compression", cfg.tonemap_compression);
@@ -134,8 +135,8 @@ void print_scene_config(const scene_config_s &cfg)
            cfg.base_dt, cfg.max_affine, cfg.escape_radius);
     printf("  Disk:      outer_r=%.1f  thickness=%.2f  density=%.1f  opacity=%.2f\n",
            cfg.disk_outer_r, cfg.disk_thickness, cfg.disk_density, cfg.disk_opacity);
-    printf("  Disk look: emission_boost=%.1f  color_variation=%.2f\n",
-           cfg.disk_emission_boost, cfg.disk_color_variation);
+    printf("  Disk look: emission_boost=%.1f  color_variation=%.2f  turbulence=%.2f\n",
+           cfg.disk_emission_boost, cfg.disk_color_variation, cfg.disk_turbulence);
     printf("  Tonemap:   compression=%.2f\n", cfg.tonemap_compression);
     printf("===========================\n");
 }
