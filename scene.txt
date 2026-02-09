@@ -7,8 +7,8 @@
 # ============================================================================
 
 # --- Output -----------------------------------------------------------------
-output_width    = 8192          # image width  in pixels (int)
-output_height   = 4096          # image height in pixels (int)
+output_width    = 512           # image width  in pixels (int)
+output_height   = 256           # image height in pixels (int)
 output_file     = output.tga    # output filename
 hdr_output      = output.hdr    # HDR output (Radiance .hdr); empty = disabled
                                 # Set to e.g. output.hdr to export raw linear HDR
@@ -30,8 +30,8 @@ camera_z        = 0.0
 camera_pitch    = 10.0          # rotation in degrees
 camera_yaw      = 90.0
 camera_roll     = 0.0
-fov_x           = 360.0         # horizontal field of view (degrees)
-fov_y           = 180.0         # vertical   field of view (degrees)
+fov_x           = 180.0         # horizontal field of view (degrees)
+fov_y           = 90.0         # vertical   field of view (degrees)
 
 # --- Black hole -------------------------------------------------------------
 bh_mass         = 1.0           # mass parameter M
@@ -71,9 +71,9 @@ aa_samples            = 3
 #   bloom_strength:  0 = off, 0.3 = subtle, 0.7 = cinematic, 1.0+ = heavy
 #   bloom_threshold: HDR brightness above which bloom triggers (0-1, lower = more glow)
 #   bloom_radius:    blur radius as fraction of image diagonal (0.01 = tight, 0.05 = wide)
-bloom_strength        = 0.0
-bloom_threshold       = 1.0
-bloom_radius          = 0.0
+bloom_strength        = 1.0
+bloom_threshold       = 0.6
+bloom_radius          = 0.2
 
 # --- Animation --------------------------------------------------------------
 # Frame time for disk rotation.  At time=0 the disk is at rest.
