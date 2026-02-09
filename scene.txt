@@ -27,8 +27,8 @@ camera_z        = 0.0
 camera_pitch    = 10.0          # rotation in degrees
 camera_yaw      = 90.0
 camera_roll     = 0.0
-fov_x           = 360.0         # horizontal field of view (degrees)
-fov_y           = 180.0         # vertical   field of view (degrees)
+fov_x           = 180.0         # horizontal field of view (degrees)
+fov_y           = 90.0         # vertical   field of view (degrees)
 
 # --- Black hole -------------------------------------------------------------
 bh_mass         = 1.0           # mass parameter M
@@ -56,3 +56,9 @@ disk_turbulence       = 0.8     # 0 = smooth uniform disk, 1 = torn-apart debris
 #   0.5 = moderate lift
 #   1.0 = heavy compression (Interstellar / movie look)
 tonemap_compression   = 1.0
+
+# --- Animation --------------------------------------------------------------
+# Frame time for disk rotation.  At time=0 the disk is at rest.
+# Increment by ~1.0 per frame for visible rotation.  Inner material orbits
+# faster (Keplerian ω ∝ r^{-3/2}), so you get natural differential rotation.
+time                  = 0.0

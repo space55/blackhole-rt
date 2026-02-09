@@ -16,6 +16,7 @@ struct accretion_disk_s
     double emission_boost = 1.0;  // Multiplier for visual brightness (does not affect opacity)
     double color_variation = 0.0; // 0 = physically accurate, 1 = full cinematic color palette
     double turbulence = 0.0;      // 0 = smooth uniform disk, 1 = torn-apart debris ring
+    double time = 0.0;            // animation time: offsets spiral phases for rotation
 
     // Construct with ISCO as default inner radius
     accretion_disk_s(const blackhole_s *black_hole, double r_outer, double h, double rho0, double kappa0);

@@ -54,6 +54,9 @@ struct scene_config_s
 
     // Tone mapping
     double tonemap_compression = 1.0;
+
+    // Animation
+    double time = 0.0; // frame time for disk rotation / animation
 };
 
 // Load a scene description from a key=value text file.

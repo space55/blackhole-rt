@@ -42,18 +42,22 @@ double accretion_disk_s::warped_half_thickness(const Vector3d &pos) const
     const double log_r = log(std::max(r_ks, 1e-6));
     const double t = turbulence;
 
+    // Keplerian time offset so thickness warps co-rotate with clump pattern
+    const double omega = 1.0 / (r_ks * sqrt(r_ks));
+    const double tp = time * omega;
+
     // Large-scale azimuthal lumps (2-3 dominant thick/thin regions)
     double warp = 0.0;
-    warp += 0.55 * sin(2.0 * phi - 3.0 * log_r + 1.2);
-    warp += 0.35 * sin(3.0 * phi - 5.0 * log_r + 4.1);
+    warp += 0.55 * sin(2.0 * (phi + tp) - 3.0 * log_r + 1.2);
+    warp += 0.35 * sin(3.0 * (phi + tp) - 5.0 * log_r + 4.1);
 
     // Medium-scale: turbulent puffiness variations
-    warp += 0.25 * sin(5.0 * phi - 9.0 * log_r + 0.7);
-    warp += 0.18 * sin(7.0 * phi - 11.0 * log_r + 2.9);
+    warp += 0.25 * sin(5.0 * (phi + tp) - 9.0 * log_r + 0.7);
+    warp += 0.18 * sin(7.0 * (phi + tp) - 11.0 * log_r + 2.9);
 
     // Fine-scale: small billows and wisps
-    warp += 0.12 * sin(11.0 * phi - 17.0 * log_r + 5.3);
-    warp += 0.08 * sin(17.0 * phi - 23.0 * log_r + 3.1);
+    warp += 0.12 * sin(11.0 * (phi + tp) - 17.0 * log_r + 5.3);
+    warp += 0.08 * sin(17.0 * (phi + tp) - 23.0 * log_r + 3.1);
 
     // Narrow gaps / tears in the disk (sharp dips)
     auto dip = [](double phase, double sharpness) -> double
@@ -61,8 +65,8 @@ double accretion_disk_s::warped_half_thickness(const Vector3d &pos) const
         double s = sin(phase);
         return pow(s * s, sharpness);
     };
-    warp -= 0.70 * dip(3.0 * phi - 4.0 * log_r + 2.5, 4.0);
-    warp -= 0.40 * dip(5.0 * phi - 8.0 * log_r + 0.3, 5.0);
+    warp -= 0.70 * dip(3.0 * (phi + tp) - 4.0 * log_r + 2.5, 4.0);
+    warp -= 0.40 * dip(5.0 * (phi + tp) - 8.0 * log_r + 0.3, 5.0);
 
     // Apply: factor range from near-zero (gap) to ~2x (puffy clump)
     // At turbulence=1, full effect; at turbulence=0.5, half effect
@@ -104,6 +108,13 @@ double accretion_disk_s::clump_factor(const Vector3d &pos) const
     const double log_r = log(r_ks);
     const double r_norm = (r_ks - inner_r) / (outer_r - inner_r);
 
+    // --- Time-dependent rotation -----------------------------------------
+    // Each radial shell rotates at a Keplerian angular velocity ∝ r^{-3/2}.
+    // The time parameter shifts the azimuthal phase so that sequential
+    // frames show differential rotation (inner material leads outer).
+    const double omega = 1.0 / (r_ks * sqrt(r_ks)); // ~ Keplerian
+    const double t_phase = time * omega;
+
     // --- Height-dependent phase offset -----------------------------------
     // Without this, the clump pattern is constant along vertical columns,
     // producing vertical striping when viewed edge-on.  Adding a phase
@@ -129,31 +140,31 @@ double accretion_disk_s::clump_factor(const Vector3d &pos) const
 
     // === LARGE-SCALE: 2 dominant trailing spiral arms ====================
     // Use a sharpened streak so these read as distinct bright arcs
-    mod += 1.4 * streak(2.0 * phi - 4.5 * log_r + 0.5 + y_phase, 3.0);
+    mod += 1.4 * streak(2.0 * (phi + t_phase) - 4.5 * log_r + 0.5 + y_phase, 3.0);
 
     // === SECONDARY: 3-arm spiral, offset phase ===========================
-    mod += 0.7 * streak(3.0 * phi - 7.0 * log_r + 2.1 + 1.5 * y_phase, 2.5);
+    mod += 0.7 * streak(3.0 * (phi + t_phase) - 7.0 * log_r + 2.1 + 1.5 * y_phase, 2.5);
 
     // === MEDIUM: sheared turbulent clumps → azimuthal streaks =============
-    mod += 0.45 * streak(7.0 * phi - 13.0 * log_r + 1.3 + 2.0 * y_phase, 2.0);
-    mod += 0.35 * streak(11.0 * phi - 19.0 * log_r - 0.8 + 2.5 * y_phase, 2.0);
+    mod += 0.45 * streak(7.0 * (phi + t_phase) - 13.0 * log_r + 1.3 + 2.0 * y_phase, 2.0);
+    mod += 0.35 * streak(11.0 * (phi + t_phase) - 19.0 * log_r - 0.8 + 2.5 * y_phase, 2.0);
 
     // === FINE: high-frequency turbulent streaks ===========================
-    mod += 0.25 * sin(17.0 * phi - 25.0 * log_r + 3.7 + 3.0 * y_phase);
-    mod += 0.15 * sin(23.0 * phi - 33.0 * log_r + 0.4 + 4.0 * y_phase);
-    mod += 0.10 * sin(31.0 * phi - 45.0 * log_r + 5.2 + 5.0 * y_phase);
+    mod += 0.25 * sin(17.0 * (phi + t_phase) - 25.0 * log_r + 3.7 + 3.0 * y_phase);
+    mod += 0.15 * sin(23.0 * (phi + t_phase) - 33.0 * log_r + 0.4 + 4.0 * y_phase);
+    mod += 0.10 * sin(31.0 * (phi + t_phase) - 45.0 * log_r + 5.2 + 5.0 * y_phase);
 
     // === RADIAL hot-spot rings × spiral ==================================
     mod += 0.40 * streak(5.0 * r_ks + 1.0 + 0.5 * y_phase, 2.0) *
-           cos(3.0 * phi - 5.0 * log_r + y_phase);
+           cos(3.0 * (phi + t_phase) - 5.0 * log_r + y_phase);
 
     // === BRIGHT KNOTS: cross-term localised clumps =======================
     mod += 0.35 * streak(4.0 * M_PI * r_norm, 2.0) *
-           streak(9.0 * phi - 14.0 * log_r + 1.9 + 2.0 * y_phase, 2.0);
+           streak(9.0 * (phi + t_phase) - 14.0 * log_r + 1.9 + 2.0 * y_phase, 2.0);
 
     // === DARK LANES: subtract narrow dark gaps between bright streaks =====
-    mod -= 0.50 * streak(5.0 * phi - 8.0 * log_r + 4.0 + 1.8 * y_phase, 4.0);
-    mod -= 0.30 * streak(8.0 * phi - 15.0 * log_r + 0.7 + 2.2 * y_phase, 5.0);
+    mod -= 0.50 * streak(5.0 * (phi + t_phase) - 8.0 * log_r + 4.0 + 1.8 * y_phase, 4.0);
+    mod -= 0.30 * streak(8.0 * (phi + t_phase) - 15.0 * log_r + 0.7 + 2.2 * y_phase, 5.0);
 
     // === RADIAL BRIGHTNESS ENVELOPE: fade inner/outer edges ==============
     // Boost mid-disk contrast; let edges be calmer

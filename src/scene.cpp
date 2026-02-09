@@ -120,6 +120,9 @@ bool load_scene_config(const char *path, scene_config_s &cfg)
     // Tone mapping
     get_double("tonemap_compression", cfg.tonemap_compression);
 
+    // Animation
+    get_double("time", cfg.time);
+
     return true;
 }
 
@@ -146,5 +149,6 @@ void print_scene_config(const scene_config_s &cfg)
     printf("  Disk look: emission_boost=%.1f  color_variation=%.2f  turbulence=%.2f\n",
            cfg.disk_emission_boost, cfg.disk_color_variation, cfg.disk_turbulence);
     printf("  Tonemap:   compression=%.2f\n", cfg.tonemap_compression);
+    printf("  Animation: time=%.4f\n", cfg.time);
     printf("===========================\n");
 }
