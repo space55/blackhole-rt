@@ -83,14 +83,19 @@ bool ray_s::advance(double dt)
 
     const double r_plus = bh->event_horizon_radius();
 
+    // Fused horizon check + geodesic acceleration: geodesic_accel
+    // already computes the KS radius internally, so we retrieve it
+    // via out_ks_r instead of calling ks_radius() a second time.
     auto deriv = [&](const Vector3d &x, const Vector3d &v, bool &inside) -> Deriv
     {
-        if (bh->ks_radius(x) <= r_plus)
+        double r;
+        Vector3d accel = bh->geodesic_accel(x, v, &r);
+        if (r <= r_plus)
         {
             inside = true;
             return {Vector3d::Zero(), Vector3d::Zero()};
         }
-        return {v, bh->geodesic_accel(x, v)};
+        return {v, accel};
     };
 
     bool inside = false;
@@ -109,6 +114,9 @@ bool ray_s::advance(double dt)
 
     pos += (dt / 6.0) * (k1.dx + 2.0 * k2.dx + 2.0 * k3.dx + k4.dx);
     vel += (dt / 6.0) * (k1.dv + 2.0 * k2.dv + 2.0 * k3.dv + k4.dv);
+
+    // Cache the KS radius at the updated position for the main render loop
+    cached_ks_r = bh->ks_radius(pos);
     return true;
 }
 

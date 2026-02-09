@@ -104,11 +104,12 @@ int main(int argc, char *argv[])
                       fov_x,
                       fov_y);
 
+            ray.cached_ks_r = bh.ks_radius(ray.pos);
             double affine = 0.0;
             while (affine < max_affine)
             {
-                // Use Kerr-Schild radius for step sizing
-                const double r_ks = ray.kerr_radius();
+                // Use cached Kerr-Schild radius for step sizing (updated by advance())
+                const double r_ks = ray.cached_ks_r;
                 const double delta = std::max(r_ks - r_plus, 0.01);
                 double step_dt = base_dt * std::clamp(delta * delta, 0.0001, 1.0);
 
@@ -137,7 +138,7 @@ int main(int argc, char *argv[])
                     disk_samples.fetch_add(1, std::memory_order_relaxed);
 
                 affine += step_dt;
-                if (ray.has_crossed_event_horizon() || !std::isfinite(ray.vel.squaredNorm()))
+                if (ray.cached_ks_r <= r_plus || !std::isfinite(ray.vel.squaredNorm()))
                 {
                     hit_black_hole = true;
                     break;

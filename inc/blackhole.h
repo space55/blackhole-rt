@@ -40,7 +40,9 @@ struct blackhole_s
     void metric_partials(const Vector3d &pos, Matrix4d partials[3]) const;
 
     // Geodesic acceleration: d^2 x^mu / dlambda^2 = -Gamma^mu_ab u^a u^b
-    Vector3d geodesic_accel(const Vector3d &pos, const Vector3d &vel) const;
+    // Optionally outputs the computed KS radius to avoid redundant recomputation.
+    Vector3d geodesic_accel(const Vector3d &pos, const Vector3d &vel,
+                            double *out_ks_r = nullptr) const;
 
     // Static ISCO formula (usable without an instance)
     static double compute_isco(double M, double a);

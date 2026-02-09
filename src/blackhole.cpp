@@ -218,7 +218,11 @@ void blackhole_s::metric_partials(const Vector3d &pos, Matrix4d partials[3]) con
 //   g_inv = η - 2H l_up⊗l_up   (Kerr-Schild form)
 //   ⇒ g_inv · F = F(spatial) - 2H l_up · (l_up·F)
 // ---------------------------------------------------------------------------
-Vector3d blackhole_s::geodesic_accel(const Vector3d &pos, const Vector3d &vel) const
+#if defined(__GNUC__) || defined(__clang__)
+__attribute__((hot))
+#endif
+Vector3d blackhole_s::geodesic_accel(const Vector3d &pos, const Vector3d &vel,
+                                     double *out_ks_r) const
 {
     const double x = pos.x(), y = pos.y(), z = pos.z();
     const double a = spin, a2 = a * a;
@@ -228,30 +232,31 @@ Vector3d blackhole_s::geodesic_accel(const Vector3d &pos, const Vector3d &vel) c
     const double term = rho2 - a2;
     const double r2 = 0.5 * (term + sqrt(term * term + 4.0 * a2 * y * y));
     const double r = sqrt(std::max(r2, 1e-12));
-    const double r3 = r2 * r;
+    const double inv_r = 1.0 / r;
+    const double inv_r2 = inv_r * inv_r;
+
+    if (out_ks_r)
+        *out_ks_r = r;
 
     // --- Null vector l, Sigma, H (shared) --------------------------------
     const double P = r2 + a2;
-    const double P2 = P * P;
     const double inv_P = 1.0 / P;
+    const double inv_P2 = inv_P * inv_P;
     const double lx = (r * x + a * z) * inv_P;
-    const double ly = y / r;
+    const double ly = y * inv_r;
     const double lz = (r * z - a * x) * inv_P;
 
-    const double Sigma = r2 + a2 * y * y / r2;
+    const double Sigma = r2 + a2 * y * y * inv_r2;
     const double inv_Sigma = 1.0 / Sigma;
     const double H = mass * r * inv_Sigma;
 
     // --- Inline u^0 from null condition (no separate metric() call) ------
     const double twoH = 2.0 * H;
     const double g00 = -1.0 + twoH;
-    const double g0x = twoH * lx;
-    const double g0y = twoH * ly;
-    const double g0z = twoH * lz;
 
     const double v1 = vel.x(), v2 = vel.y(), v3 = vel.z();
-    const double b_u0 = 2.0 * (g0x * v1 + g0y * v2 + g0z * v3);
     const double lv = lx * v1 + ly * v2 + lz * v3;
+    const double b_u0 = 2.0 * twoH * lv;
     const double v_sq = v1 * v1 + v2 * v2 + v3 * v3;
     const double c_u0 = v_sq + twoH * lv * lv;
 
@@ -267,16 +272,15 @@ Vector3d blackhole_s::geodesic_accel(const Vector3d &pos, const Vector3d &vel) c
     const double L = u0 + lx * v1 + ly * v2 + lz * v3; // l · u
 
     // --- Partial derivative intermediates --------------------------------
-    const double inv_P2 = 1.0 / P2;
     const double inv_Sigma2 = inv_Sigma * inv_Sigma;
-    const double inv_r2 = 1.0 / r2;
     const double r_inv_Sigma = r * inv_Sigma;
 
     const double dr0 = x * r_inv_Sigma;
-    const double dr1 = y * P / (r * Sigma);
+    const double dr1 = y * P * inv_r * inv_Sigma;
     const double dr2 = z * r_inv_Sigma;
 
-    const double sig_r_coeff = 2.0 * r - 2.0 * a2 * y * y / r3;
+    const double inv_r3 = inv_r * inv_r2;
+    const double sig_r_coeff = 2.0 * r - 2.0 * a2 * y * y * inv_r3;
     const double dSigma0 = sig_r_coeff * dr0;
     const double dSigma1 = sig_r_coeff * dr1 + 2.0 * a2 * y * inv_r2;
     const double dSigma2 = sig_r_coeff * dr2;
@@ -287,24 +291,29 @@ Vector3d blackhole_s::geodesic_accel(const Vector3d &pos, const Vector3d &vel) c
     const double dH2 = mass_inv_S2 * (dr2 * Sigma - r * dSigma2);
 
     // dl_i vectors: dl_i = (0, dlx_i, dly_i, dlz_i)
+    // Factored form: dl[i]_x = dr[i]*K_x + addend, saving ~23 multiplies
     const double rxaz = r * x + a * z;
     const double rzax = r * z - a * x;
-    const double two_r_inv_P2 = 2.0 * r * inv_P2;
+    const double r_inv_P = r * inv_P;
+    const double a_inv_P = a * inv_P;
+    const double K_x = (x * P - 2.0 * r * rxaz) * inv_P2;
+    const double K_y = -y * inv_r2;
+    const double K_z = (z * P - 2.0 * r * rzax) * inv_P2;
 
     // i=0 (d/dx)
-    const double dlx0 = ((dr0 * x + r) * P - rxaz * 2.0 * r * dr0) * inv_P2;
-    const double dly0 = -y * dr0 * inv_r2;
-    const double dlz0 = ((dr0 * z - a) * P - rzax * 2.0 * r * dr0) * inv_P2;
+    const double dlx0 = dr0 * K_x + r_inv_P;
+    const double dly0 = K_y * dr0;
+    const double dlz0 = dr0 * K_z - a_inv_P;
 
     // i=1 (d/dy)
-    const double dlx1 = (dr1 * x * P - rxaz * 2.0 * r * dr1) * inv_P2;
-    const double dly1 = (-y * dr1 + r) * inv_r2;
-    const double dlz1 = (dr1 * z * P - rzax * 2.0 * r * dr1) * inv_P2;
+    const double dlx1 = dr1 * K_x;
+    const double dly1 = K_y * dr1 + inv_r;
+    const double dlz1 = dr1 * K_z;
 
     // i=2 (d/dz)
-    const double dlx2 = ((dr2 * x + a) * P - rxaz * 2.0 * r * dr2) * inv_P2;
-    const double dly2 = -y * dr2 * inv_r2;
-    const double dlz2 = ((dr2 * z + r) * P - rzax * 2.0 * r * dr2) * inv_P2;
+    const double dlx2 = dr2 * K_x + a_inv_P;
+    const double dly2 = K_y * dr2;
+    const double dlz2 = dr2 * K_z + r_inv_P;
 
     // D[i] = dl_i · u = dlx_i*v1 + dly_i*v2 + dlz_i*v3  (dl_i(0) = 0)
     const double D0 = dlx0 * v1 + dly0 * v2 + dlz0 * v3;

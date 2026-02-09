@@ -21,6 +21,9 @@ public:
     Vector3d accumulated_color = Vector3d(0, 0, 0);
     double accumulated_opacity = 0.0;
 
+    // Cached KS radius from last advance(), avoids redundant recomputation
+    double cached_ks_r = 0.0;
+
     double distance_from_origin();
     double distance_from_origin_squared() const;
     double kerr_radius() const;
