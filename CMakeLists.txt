@@ -7,8 +7,19 @@ if(NOT CMAKE_BUILD_TYPE)
     set(CMAKE_BUILD_TYPE Release)
 endif()
 
-# set the project name
-project(bhrt3 LANGUAGES CXX)
+# GPU acceleration via CUDA (off by default)
+option(USE_GPU "Build with CUDA GPU acceleration" OFF)
+
+if(USE_GPU)
+    project(bhrt3 LANGUAGES CXX CUDA)
+    set(CMAKE_CUDA_STANDARD 17)
+    # Target common GPU architectures (Volta, Ampere, Ada Lovelace, Hopper)
+    if(NOT DEFINED CMAKE_CUDA_ARCHITECTURES)
+        set(CMAKE_CUDA_ARCHITECTURES "70;80;89")
+    endif()
+else()
+    project(bhrt3 LANGUAGES CXX)
+endif()
 
 # Link-Time Optimization: enables cross-TU inlining of hot functions
 include(CheckIPOSupported)
@@ -40,10 +51,21 @@ set(SOURCES
         src/stb_impl.cpp
 )
 
+if(USE_GPU)
+    list(APPEND SOURCES gpu/gpu_render.cu)
+endif()
+
 add_executable(${PROJECT_NAME} ${SOURCES})
 
 target_include_directories(${PROJECT_NAME} PRIVATE "inc/")
 target_include_directories(${PROJECT_NAME} PRIVATE "lib/")
+target_include_directories(${PROJECT_NAME} PRIVATE "gpu/")
+
+if(USE_GPU)
+    target_compile_definitions(${PROJECT_NAME} PRIVATE USE_GPU)
+    # Fast math for CUDA device code
+    target_compile_options(${PROJECT_NAME} PRIVATE $<$<COMPILE_LANGUAGE:CUDA>:--use_fast_math>)
+endif()
 
 if(OpenMP_CXX_FOUND)
     target_link_libraries(${PROJECT_NAME} OpenMP::OpenMP_CXX)
