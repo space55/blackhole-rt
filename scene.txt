@@ -57,6 +57,12 @@ disk_turbulence       = 0.8     # 0 = smooth uniform disk, 1 = torn-apart debris
 #   1.0 = heavy compression (Interstellar / movie look)
 tonemap_compression   = 1.0
 
+# --- Anti-aliasing ----------------------------------------------------------
+# NxN stratified supersampling grid per pixel.
+#   1 = off (fastest), 2 = 4 samples, 3 = 9 samples, 4 = 16 samples
+# Use 2-3 to eliminate moiré patterns from the procedural disk texture.
+aa_samples            = 3
+
 # --- Animation --------------------------------------------------------------
 # Frame time for disk rotation.  At time=0 the disk is at rest.
 # Increment by ~1.0 per frame for visible rotation.  Inner material orbits

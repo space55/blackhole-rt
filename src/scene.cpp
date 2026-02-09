@@ -120,6 +120,11 @@ bool load_scene_config(const char *path, scene_config_s &cfg)
     // Tone mapping
     get_double("tonemap_compression", cfg.tonemap_compression);
 
+    // Anti-aliasing
+    get_int("aa_samples", cfg.aa_samples);
+    if (cfg.aa_samples < 1)
+        cfg.aa_samples = 1;
+
     // Animation
     get_double("time", cfg.time);
 
@@ -149,6 +154,7 @@ void print_scene_config(const scene_config_s &cfg)
     printf("  Disk look: emission_boost=%.1f  color_variation=%.2f  turbulence=%.2f\n",
            cfg.disk_emission_boost, cfg.disk_color_variation, cfg.disk_turbulence);
     printf("  Tonemap:   compression=%.2f\n", cfg.tonemap_compression);
+    printf("  AA:        %dx%d = %d samples/pixel\n", cfg.aa_samples, cfg.aa_samples, cfg.aa_samples * cfg.aa_samples);
     printf("  Animation: time=%.4f\n", cfg.time);
     printf("===========================\n");
 }

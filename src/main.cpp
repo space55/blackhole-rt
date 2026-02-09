@@ -89,71 +89,113 @@ int main(int argc, char *argv[])
 
     std::atomic<int> disk_samples(0);
 
+    // --- Anti-aliasing: stratified NxN supersampling ---------------------
+    const int aa_grid = std::max(cfg.aa_samples, 1);
+    const int aa_spp = aa_grid * aa_grid;
+    const double inv_spp = 1.0 / aa_spp;
+    const double inv_aa = 1.0 / aa_grid;
+    printf("Anti-aliasing: %dx%d = %d samples/pixel\n", aa_grid, aa_grid, aa_spp);
+
 #pragma omp parallel for schedule(dynamic, 1)
     for (int y = 0; y < out_height; ++y)
     {
         for (int x = 0; x < out_width; ++x)
         {
-            bool hit_black_hole = false;
             const int idx = y * out_width + x;
+            Vector3d pixel_color = Vector3d::Zero();
 
-            ray_s ray(&bh,
-                      camera_pos,
-                      camera_rot,
-                      (static_cast<double>(x) / out_width),
-                      (static_cast<double>(y) / out_height),
-                      fov_x,
-                      fov_y);
-
-            ray.cached_ks_r = bh.ks_radius(ray.pos);
-            double affine = 0.0;
-            while (affine < max_affine)
+            for (int sy = 0; sy < aa_grid; ++sy)
             {
-                // Use cached Kerr-Schild radius for step sizing (updated by advance())
-                const double r_ks = ray.cached_ks_r;
-                const double delta = std::max(r_ks - r_plus, 0.01);
-                double step_dt = base_dt * std::clamp(delta * delta, 0.0001, 1.0);
-
-                // Reduce step size when near the disk to avoid skipping through it
-                if (r_ks >= disk.inner_r * 0.8 && r_ks <= disk.outer_r * 1.2)
+                for (int sx = 0; sx < aa_grid; ++sx)
                 {
-                    const double h = disk.half_thickness(r_ks);
-                    const double y_dist = fabs(ray.pos.y());
-                    if (y_dist < 5.0 * h)
+                    // Sub-pixel offset: stratified sample at center of each grid cell
+                    const double sub_x = (x + (sx + 0.5) * inv_aa) / out_width;
+                    const double sub_y = (y + (sy + 0.5) * inv_aa) / out_height;
+
+                    bool hit_black_hole = false;
+
+                    ray_s ray(&bh,
+                              camera_pos,
+                              camera_rot,
+                              sub_x,
+                              sub_y,
+                              fov_x,
+                              fov_y);
+
+                    ray.cached_ks_r = bh.ks_radius(ray.pos);
+                    double affine = 0.0;
+                    while (affine < max_affine)
                     {
-                        // Near disk plane: limit step to fraction of disk thickness
-                        step_dt = std::min(step_dt, std::max(0.3 * h, 0.005));
+                        // Use cached Kerr-Schild radius for step sizing (updated by advance())
+                        const double r_ks = ray.cached_ks_r;
+                        const double delta = std::max(r_ks - r_plus, 0.01);
+                        double step_dt = base_dt * std::clamp(delta * delta, 0.0001, 1.0);
+
+                        // Reduce step size when near the disk to avoid skipping through it
+                        if (r_ks >= disk.inner_r * 0.8 && r_ks <= disk.outer_r * 1.2)
+                        {
+                            const double h = disk.half_thickness(r_ks);
+                            const double y_dist = fabs(ray.pos.y());
+                            if (y_dist < 5.0 * h)
+                            {
+                                // Near disk plane: limit step to fraction of disk thickness
+                                step_dt = std::min(step_dt, std::max(0.3 * h, 0.005));
+                            }
+                        }
+
+                        if (!ray.advance(step_dt))
+                        {
+                            hit_black_hole = true;
+                            break;
+                        }
+
+                        // Sample disk emission along the ray
+                        const double prev_opacity = ray.accumulated_opacity;
+                        ray.sample_disk(disk, step_dt);
+                        if (ray.accumulated_opacity > prev_opacity)
+                            disk_samples.fetch_add(1, std::memory_order_relaxed);
+
+                        affine += step_dt;
+                        if (ray.cached_ks_r <= r_plus || !std::isfinite(ray.vel.squaredNorm()))
+                        {
+                            hit_black_hole = true;
+                            break;
+                        }
+                        if (ray.distance_from_origin_squared() > escape_r2)
+                        {
+                            break;
+                        }
+                        // Early exit if disk emission is already fully opaque
+                        if (ray.accumulated_opacity > 0.99)
+                        {
+                            break;
+                        }
                     }
-                }
 
-                if (!ray.advance(step_dt))
-                {
-                    hit_black_hole = true;
-                    break;
-                }
+                    if (hit_black_hole)
+                    {
+                        // Behind horizon: just the accumulated disk emission (sky is black)
+                        Vector3d color = tonemap_disk(ray.accumulated_color);
+                        color = color.cwiseMax(0.0).cwiseMin(1.0);
+                        pixel_color += color;
+                    }
+                    else
+                    {
+                        // Composite: tone-mapped disk emission + transmittance * sky color
+                        Vector3d sky_color = ray.project_to_sky(*image, sky_rot,
+                                                                cfg.sky_offset_u, cfg.sky_offset_v) *
+                                             cfg.sky_brightness;
+                        double transmittance = 1.0 - ray.accumulated_opacity;
+                        Vector3d color = tonemap_disk(ray.accumulated_color) + transmittance * sky_color;
+                        color = color.cwiseMax(0.0).cwiseMin(1.0);
+                        pixel_color += color;
+                    }
 
-                // Sample disk emission along the ray
-                const double prev_opacity = ray.accumulated_opacity;
-                ray.sample_disk(disk, step_dt);
-                if (ray.accumulated_opacity > prev_opacity)
-                    disk_samples.fetch_add(1, std::memory_order_relaxed);
+                } // sx
+            } // sy
 
-                affine += step_dt;
-                if (ray.cached_ks_r <= r_plus || !std::isfinite(ray.vel.squaredNorm()))
-                {
-                    hit_black_hole = true;
-                    break;
-                }
-                if (ray.distance_from_origin_squared() > escape_r2)
-                {
-                    break;
-                }
-                // Early exit if disk emission is already fully opaque
-                if (ray.accumulated_opacity > 0.99)
-                {
-                    break;
-                }
-            }
+            // Average all samples
+            pixel_color *= inv_spp;
 
             int done = pixels_done.fetch_add(1, std::memory_order_relaxed) + 1;
             if (done % out_width == 0)
@@ -161,30 +203,9 @@ int main(int argc, char *argv[])
                 printf("Progress: %d / %d pixels (%.1f%%)\n", done, total_pixels, 100.0 * done / total_pixels);
             }
 
-            if (hit_black_hole)
-            {
-                // Behind horizon: just the accumulated disk emission (sky is black)
-                Vector3d color = tonemap_disk(ray.accumulated_color);
-                color = color.cwiseMax(0.0).cwiseMin(1.0);
-                pixels[idx * 3 + 0] = static_cast<BH_COLOR_CHANNEL_TYPE>(color.x() * 255);
-                pixels[idx * 3 + 1] = static_cast<BH_COLOR_CHANNEL_TYPE>(color.y() * 255);
-                pixels[idx * 3 + 2] = static_cast<BH_COLOR_CHANNEL_TYPE>(color.z() * 255);
-                continue;
-            }
-            else
-            {
-                // Composite: tone-mapped disk emission + transmittance * sky color
-                Vector3d sky_color = ray.project_to_sky(*image, sky_rot,
-                                                        cfg.sky_offset_u, cfg.sky_offset_v) *
-                                     cfg.sky_brightness;
-                double transmittance = 1.0 - ray.accumulated_opacity;
-                Vector3d color = tonemap_disk(ray.accumulated_color) + transmittance * sky_color;
-                color = color.cwiseMax(0.0).cwiseMin(1.0);
-
-                pixels[idx * 3 + 0] = static_cast<BH_COLOR_CHANNEL_TYPE>(color.x() * 255);
-                pixels[idx * 3 + 1] = static_cast<BH_COLOR_CHANNEL_TYPE>(color.y() * 255);
-                pixels[idx * 3 + 2] = static_cast<BH_COLOR_CHANNEL_TYPE>(color.z() * 255);
-            }
+            pixels[idx * 3 + 0] = static_cast<BH_COLOR_CHANNEL_TYPE>(pixel_color.x() * 255);
+            pixels[idx * 3 + 1] = static_cast<BH_COLOR_CHANNEL_TYPE>(pixel_color.y() * 255);
+            pixels[idx * 3 + 2] = static_cast<BH_COLOR_CHANNEL_TYPE>(pixel_color.z() * 255);
         }
     }
 

@@ -55,6 +55,9 @@ struct scene_config_s
     // Tone mapping
     double tonemap_compression = 1.0;
 
+    // Anti-aliasing
+    int aa_samples = 1; // NxN supersampling grid per pixel (1=off, 2=4spp, 3=9spp, 4=16spp)
+
     // Animation
     double time = 0.0; // frame time for disk rotation / animation
 };
