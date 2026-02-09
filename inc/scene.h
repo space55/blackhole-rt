@@ -16,6 +16,11 @@ struct scene_config_s
     // Sky map
     std::string sky_image = "hubble-skymap.jpg";
     double sky_brightness = 1.0;
+    double sky_pitch = 0.0;
+    double sky_yaw = 0.0;
+    double sky_roll = 0.0;
+    double sky_offset_u = 0.0;
+    double sky_offset_v = 0.0;
 
     // Camera
     double camera_x = -25.0;

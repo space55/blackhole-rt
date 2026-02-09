@@ -14,6 +14,11 @@ output_file     = output.tga    # output filename
 # --- Sky map ----------------------------------------------------------------
 sky_image       = hubble-skymap.jpg
 sky_brightness  = 0.3           # multiplier for background sky (1.0 = original, 0 = black)
+sky_pitch       = 0.0           # sky rotation pitch in degrees (tilt up/down)
+sky_yaw         = 0.0           # sky rotation yaw in degrees (spin left/right)
+sky_roll        = 0.0           # sky rotation roll in degrees (barrel roll)
+sky_offset_u    = 0.5           # horizontal pan of sky texture (0-1 wraps around)
+sky_offset_v    = 0.0           # vertical pan of sky texture (0-1 wraps around)
 
 # --- Camera -----------------------------------------------------------------
 camera_x        = -25.0         # camera position (Cartesian)

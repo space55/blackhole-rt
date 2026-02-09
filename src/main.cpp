@@ -49,6 +49,9 @@ int main(int argc, char *argv[])
     const Vector3d camera_pos(cfg.camera_x, cfg.camera_y, cfg.camera_z);
     const Vector3d camera_rot(cfg.camera_pitch, cfg.camera_yaw, cfg.camera_roll);
 
+    // Precompute sky rotation matrix
+    const Matrix3d sky_rot = (AngleAxisd(cfg.sky_yaw * M_PI / 180.0, Vector3d::UnitY()) * AngleAxisd(cfg.sky_pitch * M_PI / 180.0, Vector3d::UnitX()) * AngleAxisd(cfg.sky_roll * M_PI / 180.0, Vector3d::UnitZ())).toRotationMatrix();
+
     std::vector<BH_COLOR_CHANNEL_TYPE> pixels(static_cast<size_t>(out_width) * static_cast<size_t>(out_height) * 3);
 
     const int total_pixels = out_width * out_height;
@@ -169,7 +172,9 @@ int main(int argc, char *argv[])
             else
             {
                 // Composite: tone-mapped disk emission + transmittance * sky color
-                Vector3d sky_color = ray.project_to_sky(*image) * cfg.sky_brightness;
+                Vector3d sky_color = ray.project_to_sky(*image, sky_rot,
+                                                        cfg.sky_offset_u, cfg.sky_offset_v) *
+                                     cfg.sky_brightness;
                 double transmittance = 1.0 - ray.accumulated_opacity;
                 Vector3d color = tonemap_disk(ray.accumulated_color) + transmittance * sky_color;
                 color = color.cwiseMax(0.0).cwiseMin(1.0);

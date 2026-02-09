@@ -81,6 +81,11 @@ bool load_scene_config(const char *path, scene_config_s &cfg)
     // Sky
     get_string("sky_image", cfg.sky_image);
     get_double("sky_brightness", cfg.sky_brightness);
+    get_double("sky_pitch", cfg.sky_pitch);
+    get_double("sky_yaw", cfg.sky_yaw);
+    get_double("sky_roll", cfg.sky_roll);
+    get_double("sky_offset_u", cfg.sky_offset_u);
+    get_double("sky_offset_v", cfg.sky_offset_v);
 
     // Camera
     get_double("camera_x", cfg.camera_x);
@@ -125,7 +130,10 @@ void print_scene_config(const scene_config_s &cfg)
 {
     printf("=== Scene Configuration ===\n");
     printf("  Output:    %d x %d  ->  %s\n", cfg.output_width, cfg.output_height, cfg.output_file.c_str());
-    printf("  Sky image: %s  brightness=%.2f\n", cfg.sky_image.c_str(), cfg.sky_brightness);
+    printf("  Sky image: %s  brightness=%.2f  rot=(%.1f, %.1f, %.1f)  offset=(%.2f, %.2f)\n",
+           cfg.sky_image.c_str(), cfg.sky_brightness,
+           cfg.sky_pitch, cfg.sky_yaw, cfg.sky_roll,
+           cfg.sky_offset_u, cfg.sky_offset_v);
     printf("  Camera:    pos=(%.2f, %.2f, %.2f)  rot=(%.1f, %.1f, %.1f)  fov=(%.1f, %.1f)\n",
            cfg.camera_x, cfg.camera_y, cfg.camera_z,
            cfg.camera_pitch, cfg.camera_yaw, cfg.camera_roll,

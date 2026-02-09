@@ -32,7 +32,8 @@ public:
 
     bool advance(double dt);
     void sample_disk(const accretion_disk_s &disk, double ds);
-    Vector3d project_to_sky(sky_image_s &sky);
+    Vector3d project_to_sky(sky_image_s &sky, const Matrix3d &sky_rot,
+                            double offset_u, double offset_v);
 };
 
 #endif
