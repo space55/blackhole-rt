@@ -12,6 +12,7 @@ struct scene_config_s
     int output_width = 1024;
     int output_height = 512;
     std::string output_file = "output.tga";
+    std::string hdr_output = ""; // empty = disabled; set to e.g. "output.hdr" to write Radiance HDR
 
     // Sky map
     std::string sky_image = "hubble-skymap.jpg";
@@ -57,6 +58,11 @@ struct scene_config_s
 
     // Anti-aliasing
     int aa_samples = 1; // NxN supersampling grid per pixel (1=off, 2=4spp, 3=9spp, 4=16spp)
+
+    // Bloom / lens flare
+    double bloom_strength = 0.0;  // 0 = off, 0.3 = subtle, 1.0 = heavy glow
+    double bloom_threshold = 0.6; // HDR brightness above which bloom triggers
+    double bloom_radius = 0.02;   // blur radius as fraction of image diagonal
 
     // Animation
     double time = 0.0; // frame time for disk rotation / animation

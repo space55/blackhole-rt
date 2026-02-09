@@ -2,6 +2,7 @@
 #include <stdio.h>
 #include <algorithm>
 #include <atomic>
+#include <chrono>
 #include <cmath>
 
 #include "common.h"
@@ -52,7 +53,11 @@ int main(int argc, char *argv[])
     // Precompute sky rotation matrix
     const Matrix3d sky_rot = (AngleAxisd(cfg.sky_yaw * M_PI / 180.0, Vector3d::UnitY()) * AngleAxisd(cfg.sky_pitch * M_PI / 180.0, Vector3d::UnitX()) * AngleAxisd(cfg.sky_roll * M_PI / 180.0, Vector3d::UnitZ())).toRotationMatrix();
 
-    std::vector<BH_COLOR_CHANNEL_TYPE> pixels(static_cast<size_t>(out_width) * static_cast<size_t>(out_height) * 3);
+    // HDR framebuffers: disk emission separate from sky for tone mapping
+    const size_t num_pixels = static_cast<size_t>(out_width) * static_cast<size_t>(out_height);
+    std::vector<Vector3d> hdr_disk(num_pixels, Vector3d::Zero());
+    std::vector<Vector3d> hdr_sky(num_pixels, Vector3d::Zero());
+    std::vector<BH_COLOR_CHANNEL_TYPE> pixels(num_pixels * 3);
 
     const int total_pixels = out_width * out_height;
     std::atomic<int> pixels_done(0);
@@ -96,6 +101,8 @@ int main(int argc, char *argv[])
     const double inv_aa = 1.0 / aa_grid;
     printf("Anti-aliasing: %dx%d = %d samples/pixel\n", aa_grid, aa_grid, aa_spp);
 
+    auto render_start = std::chrono::steady_clock::now();
+
 #pragma omp parallel for schedule(dynamic, 1)
     for (int y = 0; y < out_height; ++y)
     {
@@ -103,6 +110,7 @@ int main(int argc, char *argv[])
         {
             const int idx = y * out_width + x;
             Vector3d pixel_color = Vector3d::Zero();
+            Vector3d pixel_sky = Vector3d::Zero();
 
             for (int sy = 0; sy < aa_grid; ++sy)
             {
@@ -175,41 +183,168 @@ int main(int argc, char *argv[])
                     if (hit_black_hole)
                     {
                         // Behind horizon: just the accumulated disk emission (sky is black)
-                        Vector3d color = tonemap_disk(ray.accumulated_color);
-                        color = color.cwiseMax(0.0).cwiseMin(1.0);
-                        pixel_color += color;
+                        pixel_color += ray.accumulated_color;
                     }
                     else
                     {
-                        // Composite: tone-mapped disk emission + transmittance * sky color
+                        // Store disk and sky separately so tone mapping only affects disk
                         Vector3d sky_color = ray.project_to_sky(*image, sky_rot,
                                                                 cfg.sky_offset_u, cfg.sky_offset_v) *
                                              cfg.sky_brightness;
                         double transmittance = 1.0 - ray.accumulated_opacity;
-                        Vector3d color = tonemap_disk(ray.accumulated_color) + transmittance * sky_color;
-                        color = color.cwiseMax(0.0).cwiseMin(1.0);
-                        pixel_color += color;
+                        pixel_color += ray.accumulated_color;
+                        pixel_sky += transmittance * sky_color;
                     }
 
                 } // sx
             } // sy
 
-            // Average all samples
+            // Average all samples and store in HDR buffers
             pixel_color *= inv_spp;
+            pixel_sky *= inv_spp;
+            hdr_disk[idx] = pixel_color;
+            hdr_sky[idx] = pixel_sky;
 
             int done = pixels_done.fetch_add(1, std::memory_order_relaxed) + 1;
             if (done % out_width == 0)
             {
-                printf("Progress: %d / %d pixels (%.1f%%)\n", done, total_pixels, 100.0 * done / total_pixels);
+                auto now = std::chrono::steady_clock::now();
+                double elapsed = std::chrono::duration<double>(now - render_start).count();
+                double pct = 100.0 * done / total_pixels;
+                double avg = elapsed / done;
+                double eta = avg * (total_pixels - done);
+                int e_m = (int)elapsed / 60, e_s = (int)elapsed % 60;
+                int r_m = (int)eta / 60, r_s = (int)eta % 60;
+                printf("Progress: %d / %d (%.1f%%)  elapsed %d:%02d  ETA %d:%02d  (%.1f px/s)\n",
+                       done, total_pixels, pct, e_m, e_s, r_m, r_s, done / elapsed);
             }
-
-            pixels[idx * 3 + 0] = static_cast<BH_COLOR_CHANNEL_TYPE>(pixel_color.x() * 255);
-            pixels[idx * 3 + 1] = static_cast<BH_COLOR_CHANNEL_TYPE>(pixel_color.y() * 255);
-            pixels[idx * 3 + 2] = static_cast<BH_COLOR_CHANNEL_TYPE>(pixel_color.z() * 255);
         }
     }
 
     printf("Disk samples accumulated: %d\n", disk_samples.load());
+
+    // =====================================================================
+    // Post-processing: Bloom
+    // =====================================================================
+    if (cfg.bloom_strength > 1e-6)
+    {
+        printf("Applying bloom: strength=%.2f  threshold=%.2f  radius=%.3f\n",
+               cfg.bloom_strength, cfg.bloom_threshold, cfg.bloom_radius);
+
+        const double diag = sqrt((double)(out_width * out_width + out_height * out_height));
+        const int kernel_r = std::max((int)(cfg.bloom_radius * diag), 1);
+        const int kernel_sz = kernel_r * 2 + 1;
+
+        // Precompute 1D Gaussian kernel
+        const double sigma = kernel_r / 3.0;
+        const double inv_2s2 = 0.5 / (sigma * sigma);
+        std::vector<double> kernel(kernel_sz);
+        double ksum = 0.0;
+        for (int i = 0; i < kernel_sz; ++i)
+        {
+            double d = i - kernel_r;
+            kernel[i] = exp(-d * d * inv_2s2);
+            ksum += kernel[i];
+        }
+        for (auto &k : kernel)
+            k /= ksum;
+
+        // Step 1: Threshold — extract bright regions into a separate buffer
+        std::vector<Vector3d> bright(num_pixels, Vector3d::Zero());
+        const double thr = cfg.bloom_threshold;
+#pragma omp parallel for
+        for (size_t i = 0; i < num_pixels; ++i)
+        {
+            // Use tone-mapped luminance for thresholding to be perceptually consistent
+            Vector3d tm = tonemap_disk(hdr_disk[i]);
+            double lum = 0.2126 * tm.x() + 0.7152 * tm.y() + 0.0722 * tm.z();
+            if (lum > thr)
+            {
+                // Keep the HDR excess above threshold, scaled by how far above
+                double scale = (lum - thr) / std::max(lum, 1e-12);
+                bright[i] = hdr_disk[i] * scale;
+            }
+        }
+
+        // Step 2: Horizontal blur
+        std::vector<Vector3d> temp(num_pixels, Vector3d::Zero());
+#pragma omp parallel for
+        for (int y = 0; y < out_height; ++y)
+        {
+            for (int x = 0; x < out_width; ++x)
+            {
+                Vector3d acc = Vector3d::Zero();
+                for (int k = -kernel_r; k <= kernel_r; ++k)
+                {
+                    int sx = std::clamp(x + k, 0, out_width - 1);
+                    acc += kernel[k + kernel_r] * bright[y * out_width + sx];
+                }
+                temp[y * out_width + x] = acc;
+            }
+        }
+
+        // Step 3: Vertical blur
+        std::vector<Vector3d> bloom(num_pixels, Vector3d::Zero());
+#pragma omp parallel for
+        for (int y = 0; y < out_height; ++y)
+        {
+            for (int x = 0; x < out_width; ++x)
+            {
+                Vector3d acc = Vector3d::Zero();
+                for (int k = -kernel_r; k <= kernel_r; ++k)
+                {
+                    int sy = std::clamp(y + k, 0, out_height - 1);
+                    acc += kernel[k + kernel_r] * temp[sy * out_width + x];
+                }
+                bloom[y * out_width + x] = acc;
+            }
+        }
+
+        // Step 4: Composite bloom onto disk HDR buffer
+        const double strength = cfg.bloom_strength;
+#pragma omp parallel for
+        for (size_t i = 0; i < num_pixels; ++i)
+        {
+            hdr_disk[i] += strength * bloom[i];
+        }
+
+        printf("Bloom applied (kernel radius = %d px)\n", kernel_r);
+    }
+
+    // =====================================================================
+    // Write optional HDR output (raw linear, pre-tonemap)
+    // =====================================================================
+    if (!cfg.hdr_output.empty())
+    {
+        std::vector<float> hdr_float(num_pixels * 3);
+#pragma omp parallel for
+        for (int i = 0; i < (int)num_pixels; ++i)
+        {
+            Vector3d combined = hdr_disk[i] + hdr_sky[i];
+            hdr_float[i * 3 + 0] = static_cast<float>(combined.x());
+            hdr_float[i * 3 + 1] = static_cast<float>(combined.y());
+            hdr_float[i * 3 + 2] = static_cast<float>(combined.z());
+        }
+        if (stbi_write_hdr(cfg.hdr_output.c_str(), out_width, out_height, 3, hdr_float.data()))
+            printf("Wrote HDR: %s\n", cfg.hdr_output.c_str());
+        else
+            printf("ERROR: failed to write HDR: %s\n", cfg.hdr_output.c_str());
+    }
+
+    // =====================================================================
+    // Tone mapping + quantization
+    // =====================================================================
+    printf("Tone mapping and writing output...\n");
+#pragma omp parallel for
+    for (int i = 0; i < (int)num_pixels; ++i)
+    {
+        Vector3d color = tonemap_disk(hdr_disk[i]) + hdr_sky[i];
+        color = color.cwiseMax(0.0).cwiseMin(1.0);
+        pixels[i * 3 + 0] = static_cast<BH_COLOR_CHANNEL_TYPE>(color.x() * 255);
+        pixels[i * 3 + 1] = static_cast<BH_COLOR_CHANNEL_TYPE>(color.y() * 255);
+        pixels[i * 3 + 2] = static_cast<BH_COLOR_CHANNEL_TYPE>(color.z() * 255);
+    }
+
     stbi_write_tga(cfg.output_file.c_str(), out_width, out_height, 3, pixels.data());
     printf("Wrote %s\n", cfg.output_file.c_str());
 

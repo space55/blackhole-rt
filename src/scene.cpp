@@ -77,6 +77,7 @@ bool load_scene_config(const char *path, scene_config_s &cfg)
     get_int("output_width", cfg.output_width);
     get_int("output_height", cfg.output_height);
     get_string("output_file", cfg.output_file);
+    get_string("hdr_output", cfg.hdr_output);
 
     // Sky
     get_string("sky_image", cfg.sky_image);
@@ -125,6 +126,11 @@ bool load_scene_config(const char *path, scene_config_s &cfg)
     if (cfg.aa_samples < 1)
         cfg.aa_samples = 1;
 
+    // Bloom / lens flare
+    get_double("bloom_strength", cfg.bloom_strength);
+    get_double("bloom_threshold", cfg.bloom_threshold);
+    get_double("bloom_radius", cfg.bloom_radius);
+
     // Animation
     get_double("time", cfg.time);
 
@@ -138,6 +144,8 @@ void print_scene_config(const scene_config_s &cfg)
 {
     printf("=== Scene Configuration ===\n");
     printf("  Output:    %d x %d  ->  %s\n", cfg.output_width, cfg.output_height, cfg.output_file.c_str());
+    if (!cfg.hdr_output.empty())
+        printf("  HDR out:   %s\n", cfg.hdr_output.c_str());
     printf("  Sky image: %s  brightness=%.2f  rot=(%.1f, %.1f, %.1f)  offset=(%.2f, %.2f)\n",
            cfg.sky_image.c_str(), cfg.sky_brightness,
            cfg.sky_pitch, cfg.sky_yaw, cfg.sky_roll,
@@ -155,6 +163,8 @@ void print_scene_config(const scene_config_s &cfg)
            cfg.disk_emission_boost, cfg.disk_color_variation, cfg.disk_turbulence);
     printf("  Tonemap:   compression=%.2f\n", cfg.tonemap_compression);
     printf("  AA:        %dx%d = %d samples/pixel\n", cfg.aa_samples, cfg.aa_samples, cfg.aa_samples * cfg.aa_samples);
+    printf("  Bloom:     strength=%.2f  threshold=%.2f  radius=%.3f\n",
+           cfg.bloom_strength, cfg.bloom_threshold, cfg.bloom_radius);
     printf("  Animation: time=%.4f\n", cfg.time);
     printf("===========================\n");
 }

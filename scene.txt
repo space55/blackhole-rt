@@ -7,9 +7,12 @@
 # ============================================================================
 
 # --- Output -----------------------------------------------------------------
-output_width    = 1024          # image width  in pixels (int)
-output_height   = 512           # image height in pixels (int)
+output_width    = 512           # image width  in pixels (int)
+output_height   = 256           # image height in pixels (int)
 output_file     = output.tga    # output filename
+hdr_output      = output.hdr    # HDR output (Radiance .hdr); empty = disabled
+                                # Set to e.g. output.hdr to export raw linear HDR
+                                # for grading / bloom / exposure in external apps
 
 # --- Sky map ----------------------------------------------------------------
 sky_image       = hubble-skymap.jpg
@@ -61,7 +64,16 @@ tonemap_compression   = 1.0
 # NxN stratified supersampling grid per pixel.
 #   1 = off (fastest), 2 = 4 samples, 3 = 9 samples, 4 = 16 samples
 # Use 2-3 to eliminate moiré patterns from the procedural disk texture.
-aa_samples            = 3
+aa_samples            = 1
+
+# --- Bloom / Lens Flare -----------------------------------------------------
+# Post-process glow around bright disk regions.
+#   bloom_strength:  0 = off, 0.3 = subtle, 0.7 = cinematic, 1.0+ = heavy
+#   bloom_threshold: HDR brightness above which bloom triggers (0-1, lower = more glow)
+#   bloom_radius:    blur radius as fraction of image diagonal (0.01 = tight, 0.05 = wide)
+bloom_strength        = 1.0
+bloom_threshold       = 0.6
+bloom_radius          = 0.2
 
 # --- Animation --------------------------------------------------------------
 # Frame time for disk rotation.  At time=0 the disk is at rest.
