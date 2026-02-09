@@ -32,6 +32,8 @@ public:
     ray_s();
     ray_s(const blackhole_s *black_hole, const Vector3d &position, const Vector3d &rotation_deg,
           double x, double y, double fov_x, double fov_y);
+    ray_s(const blackhole_s *black_hole, const Vector3d &position, const Matrix3d &cam_rot,
+          double x, double y, double fov_x, double fov_y);
 
     bool advance(double dt);
     void sample_disk(const accretion_disk_s &disk, double ds);

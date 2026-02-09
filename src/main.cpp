@@ -54,6 +54,12 @@ int main(int argc, char *argv[])
     const Vector3d camera_pos(cfg.camera_x, cfg.camera_y, cfg.camera_z);
     const Vector3d camera_rot(cfg.camera_pitch, cfg.camera_yaw, cfg.camera_roll);
 
+    // Precompute camera rotation matrix once (avoids trig per ray)
+    const Matrix3d cam_rot_matrix = (AngleAxisd(cfg.camera_yaw * M_PI / 180.0, Vector3d::UnitY()) *
+                                     AngleAxisd(cfg.camera_pitch * M_PI / 180.0, Vector3d::UnitX()) *
+                                     AngleAxisd(cfg.camera_roll * M_PI / 180.0, Vector3d::UnitZ()))
+                                        .toRotationMatrix();
+
     // Precompute sky rotation matrix
     const Matrix3d sky_rot = (AngleAxisd(cfg.sky_yaw * M_PI / 180.0, Vector3d::UnitY()) * AngleAxisd(cfg.sky_pitch * M_PI / 180.0, Vector3d::UnitX()) * AngleAxisd(cfg.sky_roll * M_PI / 180.0, Vector3d::UnitZ())).toRotationMatrix();
 
@@ -239,7 +245,7 @@ int main(int argc, char *argv[])
 
                     ray_s ray(&bh,
                               camera_pos,
-                              camera_rot,
+                              cam_rot_matrix,
                               sub_x,
                               sub_y,
                               fov_x,
@@ -356,79 +362,145 @@ int main(int argc, char *argv[])
 
         const double diag = sqrt((double)(out_width * out_width + out_height * out_height));
         const int kernel_r = std::max((int)(cfg.bloom_radius * diag), 1);
-        const int kernel_sz = kernel_r * 2 + 1;
-
-        // Precompute 1D Gaussian kernel
         const double sigma = kernel_r / 3.0;
-        const double inv_2s2 = 0.5 / (sigma * sigma);
-        std::vector<double> kernel(kernel_sz);
-        double ksum = 0.0;
-        for (int i = 0; i < kernel_sz; ++i)
-        {
-            double d = i - kernel_r;
-            kernel[i] = exp(-d * d * inv_2s2);
-            ksum += kernel[i];
-        }
-        for (auto &k : kernel)
-            k /= ksum;
 
-        // Step 1: Threshold — extract bright regions into a separate buffer
-        std::vector<Vector3d> bright(num_pixels, Vector3d::Zero());
+        // --- Compute 3 box-blur radii that approximate a Gaussian ---------
+        // Three successive box blurs converge to a Gaussian (CLT).
+        // Each box of width w has variance (w²-1)/12.
+        // We want 3 * (w²-1)/12 = σ²  →  w = sqrt(12σ²/3 + 1).
+        // We use up to 3 passes with possibly different widths for a
+        // tighter approximation (Burt & Adelson / W3C filter spec).
+        const int BOX_PASSES = 3;
+        int box_radii[BOX_PASSES];
+        {
+            double w_ideal = sqrt(12.0 * sigma * sigma / BOX_PASSES + 1.0);
+            int w_lo = ((int)w_ideal) | 1; // round down to odd
+            if (w_lo < 1) w_lo = 1;
+            int w_hi = w_lo + 2;            // next odd
+            // How many passes should use w_hi vs w_lo:
+            // n_hi * (w_hi²-1)/12 + (3-n_hi) * (w_lo²-1)/12 = σ²
+            double target_var = sigma * sigma;
+            double var_lo = (w_lo * w_lo - 1) / 12.0;
+            double var_hi = (w_hi * w_hi - 1) / 12.0;
+            int n_hi = (var_hi > var_lo + 1e-12)
+                           ? std::clamp((int)round((target_var - BOX_PASSES * var_lo) / (var_hi - var_lo)), 0, BOX_PASSES)
+                           : 0;
+            for (int i = 0; i < BOX_PASSES; ++i)
+                box_radii[i] = ((i < n_hi) ? w_hi : w_lo) / 2;
+        }
+
+        printf("Bloom: σ=%.1f, box radii = [%d, %d, %d]\n",
+               sigma, box_radii[0], box_radii[1], box_radii[2]);
+
+        // Step 1: Threshold — extract bright regions (same as before)
+        // Use flat float arrays for cache-friendly access in blur passes
+        std::vector<float> buf_r(num_pixels, 0.0f);
+        std::vector<float> buf_g(num_pixels, 0.0f);
+        std::vector<float> buf_b(num_pixels, 0.0f);
         const double thr = cfg.bloom_threshold;
 #pragma omp parallel for
-        for (size_t i = 0; i < num_pixels; ++i)
+        for (int i = 0; i < (int)num_pixels; ++i)
         {
-            // Use tone-mapped luminance for thresholding to be perceptually consistent
             Vector3d tm = tonemap_disk(hdr_disk[i]);
             double lum = 0.2126 * tm.x() + 0.7152 * tm.y() + 0.0722 * tm.z();
             if (lum > thr)
             {
-                // Keep the HDR excess above threshold, scaled by how far above
                 double scale = (lum - thr) / std::max(lum, 1e-12);
-                bright[i] = hdr_disk[i] * scale;
+                buf_r[i] = (float)(hdr_disk[i].x() * scale);
+                buf_g[i] = (float)(hdr_disk[i].y() * scale);
+                buf_b[i] = (float)(hdr_disk[i].z() * scale);
             }
         }
 
-        // Step 2: Horizontal blur
-        std::vector<Vector3d> temp(num_pixels, Vector3d::Zero());
-#pragma omp parallel for
-        for (int y = 0; y < out_height; ++y)
-        {
-            for (int x = 0; x < out_width; ++x)
-            {
-                Vector3d acc = Vector3d::Zero();
-                for (int k = -kernel_r; k <= kernel_r; ++k)
-                {
-                    int sx = std::clamp(x + k, 0, out_width - 1);
-                    acc += kernel[k + kernel_r] * bright[y * out_width + sx];
-                }
-                temp[y * out_width + x] = acc;
-            }
-        }
+        // --- O(1)-per-pixel box blur via sliding window -------------------
+        // Horizontal and vertical passes, repeated BOX_PASSES times.
+        std::vector<float> tmp_r(num_pixels), tmp_g(num_pixels), tmp_b(num_pixels);
 
-        // Step 3: Vertical blur
-        std::vector<Vector3d> bloom(num_pixels, Vector3d::Zero());
-#pragma omp parallel for
-        for (int y = 0; y < out_height; ++y)
+        for (int pass = 0; pass < BOX_PASSES; ++pass)
         {
+            const int br = box_radii[pass];
+            const float inv_w = 1.0f / (2 * br + 1);
+
+            // ---- Horizontal pass ----
+#pragma omp parallel for
+            for (int y = 0; y < out_height; ++y)
+            {
+                const int row = y * out_width;
+                // Initialize running sum for first output pixel (x=0)
+                // Window: [-br, br] clamped to [0, out_width-1]
+                float sr = 0.0f, sg = 0.0f, sb = 0.0f;
+                for (int k = -br; k <= br; ++k)
+                {
+                    int sx = std::clamp(k, 0, out_width - 1);
+                    sr += buf_r[row + sx];
+                    sg += buf_g[row + sx];
+                    sb += buf_b[row + sx];
+                }
+                tmp_r[row] = sr * inv_w;
+                tmp_g[row] = sg * inv_w;
+                tmp_b[row] = sb * inv_w;
+
+                for (int x = 1; x < out_width; ++x)
+                {
+                    // Add pixel entering the window on the right
+                    int add = std::min(x + br, out_width - 1);
+                    sr += buf_r[row + add];
+                    sg += buf_g[row + add];
+                    sb += buf_b[row + add];
+                    // Remove pixel leaving the window on the left
+                    int rem = std::clamp(x - br - 1, 0, out_width - 1);
+                    sr -= buf_r[row + rem];
+                    sg -= buf_g[row + rem];
+                    sb -= buf_b[row + rem];
+
+                    tmp_r[row + x] = sr * inv_w;
+                    tmp_g[row + x] = sg * inv_w;
+                    tmp_b[row + x] = sb * inv_w;
+                }
+            }
+
+            // ---- Vertical pass ----
+#pragma omp parallel for
             for (int x = 0; x < out_width; ++x)
             {
-                Vector3d acc = Vector3d::Zero();
-                for (int k = -kernel_r; k <= kernel_r; ++k)
+                float sr = 0.0f, sg = 0.0f, sb = 0.0f;
+                for (int k = -br; k <= br; ++k)
                 {
-                    int sy = std::clamp(y + k, 0, out_height - 1);
-                    acc += kernel[k + kernel_r] * temp[sy * out_width + x];
+                    int sy = std::clamp(k, 0, out_height - 1);
+                    sr += tmp_r[sy * out_width + x];
+                    sg += tmp_g[sy * out_width + x];
+                    sb += tmp_b[sy * out_width + x];
                 }
-                bloom[y * out_width + x] = acc;
+                buf_r[x] = sr * inv_w;
+                buf_g[x] = sg * inv_w;
+                buf_b[x] = sb * inv_w;
+
+                for (int y = 1; y < out_height; ++y)
+                {
+                    int add = std::min(y + br, out_height - 1);
+                    sr += tmp_r[add * out_width + x];
+                    sg += tmp_g[add * out_width + x];
+                    sb += tmp_b[add * out_width + x];
+                    int rem = std::clamp(y - br - 1, 0, out_height - 1);
+                    sr -= tmp_r[rem * out_width + x];
+                    sg -= tmp_g[rem * out_width + x];
+                    sb -= tmp_b[rem * out_width + x];
+
+                    buf_r[y * out_width + x] = sr * inv_w;
+                    buf_g[y * out_width + x] = sg * inv_w;
+                    buf_b[y * out_width + x] = sb * inv_w;
+                }
             }
         }
 
         // Step 4: Composite bloom onto disk HDR buffer
         const double strength = cfg.bloom_strength;
 #pragma omp parallel for
-        for (size_t i = 0; i < num_pixels; ++i)
+        for (int i = 0; i < (int)num_pixels; ++i)
         {
-            hdr_disk[i] += strength * bloom[i];
+            hdr_disk[i].x() += strength * buf_r[i];
+            hdr_disk[i].y() += strength * buf_g[i];
+            hdr_disk[i].z() += strength * buf_b[i];
         }
 
         printf("Bloom applied (kernel radius = %d px)\n", kernel_r);

@@ -58,13 +58,18 @@ double blackhole_s::ks_radius(const Vector3d &pos) const
 // ---------------------------------------------------------------------------
 MetricResult blackhole_s::metric(const Vector3d &pos) const
 {
+    return metric(pos, ks_radius(pos));
+}
+
+MetricResult blackhole_s::metric(const Vector3d &pos, double r_ks) const
+{
     const double x = pos.x();
     const double y = pos.y();
     const double z = pos.z();
 
     const double a = spin;
     const double a2 = a * a;
-    const double r = ks_radius(pos);
+    const double r = r_ks;
     const double r2 = r * r;
 
     const double denom = r2 + a2;

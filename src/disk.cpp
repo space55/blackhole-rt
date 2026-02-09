@@ -31,7 +31,11 @@ double accretion_disk_s::half_thickness(double r_ks) const
 // ---------------------------------------------------------------------------
 double accretion_disk_s::warped_half_thickness(const Vector3d &pos) const
 {
-    const double r_ks = bh->ks_radius(pos);
+    return warped_half_thickness(pos, bh->ks_radius(pos));
+}
+
+double accretion_disk_s::warped_half_thickness(const Vector3d &pos, double r_ks) const
+{
     const double h0 = half_thickness(std::min(r_ks, outer_r));
 
     if (turbulence < 1e-6)
@@ -79,13 +83,17 @@ double accretion_disk_s::warped_half_thickness(const Vector3d &pos) const
 // ---------------------------------------------------------------------------
 bool accretion_disk_s::contains(const Vector3d &pos) const
 {
-    const double r_ks = bh->ks_radius(pos);
+    return contains(pos, bh->ks_radius(pos));
+}
+
+bool accretion_disk_s::contains(const Vector3d &pos, double r_ks) const
+{
     // Allow a fade zone extending 20% past outer_r for smooth falloff
     const double fade_limit = outer_r * 1.2;
     if (r_ks < inner_r || r_ks > fade_limit)
         return false;
 
-    const double h = warped_half_thickness(pos);
+    const double h = warped_half_thickness(pos, r_ks);
     const double height = fabs(pos.y());
     return height <= 3.0 * h;
 }
@@ -98,7 +106,11 @@ bool accretion_disk_s::contains(const Vector3d &pos) const
 // ---------------------------------------------------------------------------
 double accretion_disk_s::clump_factor(const Vector3d &pos) const
 {
-    const double r_ks = bh->ks_radius(pos);
+    return clump_factor(pos, bh->ks_radius(pos));
+}
+
+double accretion_disk_s::clump_factor(const Vector3d &pos, double r_ks) const
+{
     if (r_ks < inner_r || r_ks > outer_r)
         return 1.0;
 
@@ -122,7 +134,7 @@ double accretion_disk_s::clump_factor(const Vector3d &pos) const
     // are coherent *along the orbital plane* (horizontal from the side).
     // Physically: turbulent eddies at different heights are at different
     // azimuthal phases due to vertical shear.
-    const double h = warped_half_thickness(pos);
+    const double h = warped_half_thickness(pos, r_ks);
     const double y_over_h = (h > 1e-12) ? (y / h) : 0.0;
     // Large tilt so the pattern is clearly horizontal, not vertical
     const double y_phase = 3.0 * y_over_h;
@@ -184,12 +196,16 @@ double accretion_disk_s::clump_factor(const Vector3d &pos) const
 // ---------------------------------------------------------------------------
 double accretion_disk_s::density(const Vector3d &pos) const
 {
-    const double r_ks = bh->ks_radius(pos);
+    return density(pos, bh->ks_radius(pos));
+}
+
+double accretion_disk_s::density(const Vector3d &pos, double r_ks) const
+{
     const double fade_limit = outer_r * 1.2;
     if (r_ks < inner_r || r_ks > fade_limit)
         return 0.0;
 
-    const double h = warped_half_thickness(pos);
+    const double h = warped_half_thickness(pos, r_ks);
     if (h < 1e-12)
         return 0.0;
 
@@ -205,7 +221,7 @@ double accretion_disk_s::density(const Vector3d &pos) const
         outer_fade = exp(-(r_ks - outer_r) * (r_ks - outer_r) / (2.0 * fade_width * fade_width));
     }
 
-    return density0 * radial * vertical * clump_factor(pos) * outer_fade;
+    return density0 * radial * vertical * clump_factor(pos, r_ks) * outer_fade;
 }
 
 // ---------------------------------------------------------------------------
@@ -213,7 +229,11 @@ double accretion_disk_s::density(const Vector3d &pos) const
 // ---------------------------------------------------------------------------
 double accretion_disk_s::temperature(const Vector3d &pos) const
 {
-    const double r_ks = bh->ks_radius(pos);
+    return temperature(pos, bh->ks_radius(pos));
+}
+
+double accretion_disk_s::temperature(const Vector3d &pos, double r_ks) const
+{
     const double fade_limit = outer_r * 1.2;
     if (r_ks < inner_r || r_ks > fade_limit)
         return 0.0;
@@ -301,13 +321,18 @@ Vector3d accretion_disk_s::temperature_to_rgb(double T)
 // ---------------------------------------------------------------------------
 Vector3d accretion_disk_s::emissivity(const Vector3d &pos, double *alpha_out) const
 {
-    const double rho = density(pos);
+    return emissivity(pos, bh->ks_radius(pos), alpha_out);
+}
+
+Vector3d accretion_disk_s::emissivity(const Vector3d &pos, double r_ks, double *alpha_out) const
+{
+    const double rho = density(pos, r_ks);
     if (alpha_out)
         *alpha_out = opacity0 * rho;
     if (rho < 1e-12)
         return Vector3d(0, 0, 0);
 
-    const double T = temperature(pos);
+    const double T = temperature(pos, r_ks);
     if (T < 1e-12)
         return Vector3d(0, 0, 0);
 
@@ -317,7 +342,6 @@ Vector3d accretion_disk_s::emissivity(const Vector3d &pos, double *alpha_out) co
     // --- Cinematic color tint (controlled by color_variation) -------------
     if (color_variation > 1e-6)
     {
-        const double r_ks = bh->ks_radius(pos);
         const double x = pos.x(), z = pos.z();
         const double phi = atan2(z, x);
         const double log_r = log(std::max(r_ks, 1e-6));
@@ -383,8 +407,12 @@ double accretion_disk_s::absorption(const Vector3d &pos) const
 // ---------------------------------------------------------------------------
 Vector4d accretion_disk_s::gas_four_velocity(const Vector3d &pos) const
 {
+    return gas_four_velocity(pos, bh->ks_radius(pos));
+}
+
+Vector4d accretion_disk_s::gas_four_velocity(const Vector3d &pos, double r_ks) const
+{
     const double x = pos.x(), z = pos.z();
-    const double r_ks = bh->ks_radius(pos);
 
     if (r_ks < inner_r)
         return Vector4d(-1, 0, 0, 0);

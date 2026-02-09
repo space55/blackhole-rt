@@ -12,6 +12,8 @@
 #include <cuda_runtime.h>
 #include <math.h>
 #include <stdio.h>
+#include <chrono>
+#include <thread>
 
 #ifndef M_PI
 #define M_PI 3.141592653589793238462643383279
@@ -712,7 +714,7 @@ __device__ void gpu_sample_disk(dvec3 pos, dvec3 vel, double ds,
 // ============================================================================
 // Render Kernel — one thread per pixel, AA loop inside
 // ============================================================================
-__global__ __launch_bounds__(256) void render_kernel(GPUPixelResult *results)
+__global__ __launch_bounds__(256) void render_kernel(GPUPixelResult *results, int *progress)
 {
     const int px = blockIdx.x * blockDim.x + threadIdx.x;
     const int py = blockIdx.y * blockDim.y + threadIdx.y;
@@ -828,6 +830,9 @@ __global__ __launch_bounds__(256) void render_kernel(GPUPixelResult *results)
     results[idx].exit_vx = (float)pixel_exit_dir.x;
     results[idx].exit_vy = (float)pixel_exit_dir.y;
     results[idx].exit_vz = (float)pixel_exit_dir.z;
+
+    // Update progress counter (visible to host via mapped pinned memory)
+    atomicAdd(progress, 1);
 }
 
 // ============================================================================
@@ -862,6 +867,13 @@ bool gpu_render(const GPUSceneParams &params, GPUPixelResult *host_results)
     // Copy scene parameters to constant memory
     CUDA_CHECK(cudaMemcpyToSymbol(c_params, &params, sizeof(GPUSceneParams)));
 
+    // Allocate mapped pinned memory for progress counter (zero-copy host↔device)
+    int *h_progress = nullptr;
+    int *d_progress = nullptr;
+    CUDA_CHECK(cudaHostAlloc(&h_progress, sizeof(int), cudaHostAllocMapped));
+    *h_progress = 0;
+    CUDA_CHECK(cudaHostGetDevicePointer(&d_progress, h_progress, 0));
+
     // Launch kernel
     dim3 block(16, 16);
     dim3 grid((params.width + 15) / 16, (params.height + 15) / 16);
@@ -871,13 +883,30 @@ bool gpu_render(const GPUSceneParams &params, GPUPixelResult *host_results)
     CUDA_CHECK(cudaEventCreate(&stop));
     CUDA_CHECK(cudaEventRecord(start));
 
-    render_kernel<<<grid, block>>>(d_results);
+    render_kernel<<<grid, block>>>(d_results, d_progress);
 
-    CUDA_CHECK(cudaEventRecord(stop));
-    CUDA_CHECK(cudaEventSynchronize(stop));
-
-    // Check for kernel errors
     CUDA_CHECK(cudaGetLastError());
+    CUDA_CHECK(cudaEventRecord(stop));
+
+    // Poll progress until kernel completes
+    auto poll_start = std::chrono::steady_clock::now();
+    while (cudaEventQuery(stop) == cudaErrorNotReady)
+    {
+        int done = *h_progress;  // mapped memory: no cudaMemcpy needed
+        double pct = 100.0 * done / (double)num_pixels;
+        auto now = std::chrono::steady_clock::now();
+        double elapsed = std::chrono::duration<double>(now - poll_start).count();
+        double rate = (elapsed > 0.01) ? done / elapsed : 0;
+        double eta = (rate > 0 && done < num_pixels) ? (num_pixels - done) / rate : 0;
+        printf("\rGPU progress: %6.2f%% (%d / %d px)  %.1f Mpx/s  ETA %.1fs   ",
+               pct, done, num_pixels, rate / 1e6, eta);
+        fflush(stdout);
+        std::this_thread::sleep_for(std::chrono::milliseconds(250));
+    }
+    printf("\rGPU progress: 100.00%% (%d / %d px)                              \n",
+           num_pixels, num_pixels);
+
+    CUDA_CHECK(cudaEventSynchronize(stop));
 
     float ms = 0;
     CUDA_CHECK(cudaEventElapsedTime(&ms, start, stop));
@@ -889,6 +918,7 @@ bool gpu_render(const GPUSceneParams &params, GPUPixelResult *host_results)
 
     // Cleanup
     cudaFree(d_results);
+    cudaFreeHost(h_progress);
     cudaEventDestroy(start);
     cudaEventDestroy(stop);
 

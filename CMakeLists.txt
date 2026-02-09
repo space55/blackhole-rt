@@ -63,8 +63,8 @@ target_include_directories(${PROJECT_NAME} PRIVATE "gpu/")
 
 if(USE_GPU)
     target_compile_definitions(${PROJECT_NAME} PRIVATE USE_GPU)
-    # Fast math for CUDA device code
-    target_compile_options(${PROJECT_NAME} PRIVATE $<$<COMPILE_LANGUAGE:CUDA>:--use_fast_math>)
+    # Fast math for CUDA device code; -lineinfo for profiling
+    target_compile_options(${PROJECT_NAME} PRIVATE $<$<COMPILE_LANGUAGE:CUDA>:--use_fast_math -lineinfo>)
 endif()
 
 if(OpenMP_CXX_FOUND)

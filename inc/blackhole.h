@@ -32,6 +32,7 @@ struct blackhole_s
 
     // Full Kerr-Schild metric and inverse
     MetricResult metric(const Vector3d &pos) const;
+    MetricResult metric(const Vector3d &pos, double r_ks) const;
 
     // Solve null condition g_mu_nu u^mu u^nu = 0 for u^0
     double compute_u0_null(const Vector3d &pos, const Vector3d &vel) const;

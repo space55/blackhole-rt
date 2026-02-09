@@ -44,6 +44,29 @@ ray_s::ray_s(const blackhole_s *black_hole, const Vector3d &position, const Vect
     vel = forward * local_forward + up * local_up + right * local_right;
 }
 
+ray_s::ray_s(const blackhole_s *black_hole, const Vector3d &position, const Matrix3d &cam_rot,
+             double x, double y, double fov_x, double fov_y)
+    : bh(black_hole)
+{
+    pos = position;
+
+    const Vector3d forward = cam_rot.col(2);
+    const Vector3d right = cam_rot.col(0);
+    const Vector3d up = cam_rot.col(1);
+
+    double x_angle = (x - 0.5) * fov_x;
+    double y_angle = (0.5 - y) * fov_y;
+
+    const double x_rad = x_angle * M_PI / 180.0;
+    const double y_rad = y_angle * M_PI / 180.0;
+
+    const double local_forward = cos(y_rad) * cos(x_rad);
+    const double local_up = sin(y_rad);
+    const double local_right = cos(y_rad) * sin(x_rad);
+
+    vel = forward * local_forward + up * local_up + right * local_right;
+}
+
 // ---------------------------------------------------------------------------
 // Distance helpers
 // ---------------------------------------------------------------------------
@@ -155,15 +178,19 @@ void ray_s::sample_disk(const accretion_disk_s &disk, double ds)
     if (accumulated_opacity >= 0.999)
         return;
 
-    if (!disk.contains(pos))
+    // Use the cached KS radius — already computed by advance()
+    const double r_ks = cached_ks_r;
+
+    if (!disk.contains(pos, r_ks))
         return;
 
     // Compute emissivity + absorption together (one density() call instead of two)
     double alpha;
-    const Vector3d j = disk.emissivity(pos, &alpha);
+    const Vector3d j = disk.emissivity(pos, r_ks, &alpha);
 
     // Compute metric once — shared by u0 solve and redshift calculation
-    const MetricResult m = bh->metric(pos);
+    // Pass precomputed r_ks to avoid recomputing it inside metric()
+    const MetricResult m = bh->metric(pos, r_ks);
 
     // Inline u0 from null condition (avoids second metric() inside compute_u0_null)
     const double v1 = vel.x(), v2 = vel.y(), v3 = vel.z();
@@ -177,7 +204,7 @@ void ray_s::sample_disk(const accretion_disk_s &disk, double ds)
     const double u0 = (u0a < 0.0) ? u0a : u0b;
 
     const Vector4d photon_k(u0, v1, v2, v3);
-    const Vector4d gas_u = disk.gas_four_velocity(pos);
+    const Vector4d gas_u = disk.gas_four_velocity(pos, r_ks);
     const double g = accretion_disk_s::redshift_factor(photon_k, gas_u, m.g);
 
     const double g_clamped = std::clamp(g, 0.01, 10.0);
