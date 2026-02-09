@@ -15,6 +15,7 @@ struct scene_config_s
 
     // Sky map
     std::string sky_image = "hubble-skymap.jpg";
+    double sky_brightness = 1.0;
 
     // Camera
     double camera_x = -25.0;

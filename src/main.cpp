@@ -168,7 +168,7 @@ int main(int argc, char *argv[])
             else
             {
                 // Composite: tone-mapped disk emission + transmittance * sky color
-                Vector3d sky_color = ray.project_to_sky(*image);
+                Vector3d sky_color = ray.project_to_sky(*image) * cfg.sky_brightness;
                 double transmittance = 1.0 - ray.accumulated_opacity;
                 Vector3d color = tonemap_disk(ray.accumulated_color) + transmittance * sky_color;
                 color = color.cwiseMax(0.0).cwiseMin(1.0);

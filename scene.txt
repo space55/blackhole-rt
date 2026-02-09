@@ -13,6 +13,7 @@ output_file     = output.tga    # output filename
 
 # --- Sky map ----------------------------------------------------------------
 sky_image       = hubble-skymap.jpg
+sky_brightness  = 0.3           # multiplier for background sky (1.0 = original, 0 = black)
 
 # --- Camera -----------------------------------------------------------------
 camera_x        = -25.0         # camera position (Cartesian)
