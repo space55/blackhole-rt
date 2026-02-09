@@ -26,6 +26,7 @@ set(SOURCES
         src/main.cpp
         src/sky.cpp
         src/ray.cpp
+        src/disk.cpp
         src/stb_impl.cpp
 )
 

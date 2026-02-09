@@ -319,6 +319,64 @@ bool ray_s::advance(double dt)
     return true;
 }
 
+void ray_s::sample_disk(const accretion_disk_s &disk, double ds)
+{
+    // Skip if ray is already fully opaque
+    if (accumulated_opacity >= 0.999)
+        return;
+
+    // Skip if not inside the disk volume
+    if (!disk.contains(pos))
+        return;
+
+    // Get emission and absorption at this point
+    const Vector3d j = disk.emissivity(pos);
+    const double alpha = disk.absorption(pos);
+
+    // Compute redshift factor g for relativistic Doppler + gravitational shift
+    // Photon 4-momentum: (u0, vx, vy, vz)
+    const double u0 = compute_u0_null(pos, vel, kBlackHoleMass, kBlackHoleSpin);
+    const Vector4d photon_k(u0, vel.x(), vel.y(), vel.z());
+
+    // Gas 4-velocity at this point
+    const Vector4d gas_u = disk.gas_four_velocity(pos);
+
+    // Metric at this point
+    const MetricResult metric = kerr_schild_metric(pos, kBlackHoleMass, kBlackHoleSpin);
+    const double g = accretion_disk_s::redshift_factor(photon_k, gas_u, metric.g);
+
+    // Clamp redshift to avoid extreme values
+    const double g_clamped = std::clamp(g, 0.01, 10.0);
+
+    // Observed emissivity scales as g^3 (bolometric, relativistic beaming)
+    // Color shift: multiply each channel by g (blue/redshift)
+    const double g3 = g_clamped * g_clamped * g_clamped;
+
+    // Shift emission color by redshift
+    Vector3d j_obs = g3 * j;
+    // Simple color shift: boost blue for blueshift, boost red for redshift
+    if (g_clamped > 1.0)
+    {
+        // Blueshifted: enhance blue channel
+        j_obs.z() *= std::min(g_clamped, 2.0);
+    }
+    else
+    {
+        // Redshifted: enhance red channel, diminish blue
+        j_obs.x() *= std::min(1.0 / g_clamped, 2.0);
+        j_obs.z() *= g_clamped;
+    }
+
+    // Front-to-back compositing (volume rendering equation)
+    const double transmittance = 1.0 - accumulated_opacity;
+    const double dtau = alpha * ds;
+    const double absorption_factor = 1.0 - exp(-dtau);
+
+    accumulated_color += transmittance * absorption_factor * j_obs / std::max(alpha, 1e-12);
+    accumulated_opacity += transmittance * absorption_factor;
+    accumulated_opacity = std::min(accumulated_opacity, 1.0);
+}
+
 Vector3d ray_s::project_to_sky(sky_image_s &sky)
 {
     // This is sure as hell to cause an issue if the ray is pointing through a black hole. Come back to this.

@@ -8,6 +8,7 @@
 #include "types.h"
 #include "sky.h"
 #include "ray.h"
+#include "disk.h"
 
 #include "stb_image_write.h"
 
@@ -39,6 +40,13 @@ int main()
 
     const double r_plus = ray_s::event_horizon_radius();
 
+    // Accretion disk: outer_r=20M, half-thickness scale=0.5, density=20.0, opacity=0.5
+    accretion_disk_s disk(1.0, 0.99, 20.0, 0.5, 20.0, 0.5);
+    printf("Disk ISCO: %.3f M, inner_r: %.3f M, outer_r: %.1f M\n",
+           accretion_disk_s::isco_radius(1.0, 0.99), disk.inner_r, disk.outer_r);
+
+    std::atomic<int> disk_samples(0);
+
 #pragma omp parallel for schedule(dynamic, 1)
     for (int y = 0; y < out_height; ++y)
     {
@@ -48,7 +56,7 @@ int main()
             const int idx = y * out_width + x;
 
             ray_s ray(Vector3d(-15, 2, 0),
-                      Vector3d(15, 80, 10),
+                      Vector3d(15, 90, 0),
                       (static_cast<double>(x) / out_width),
                       (static_cast<double>(y) / out_height),
                       fov_x,
@@ -60,12 +68,32 @@ int main()
                 // Use Kerr-Schild radius for step sizing
                 const double r_ks = ray.kerr_radius();
                 const double delta = std::max(r_ks - r_plus, 0.01);
-                const double step_dt = base_dt * std::clamp(delta * delta, 0.0001, 1.0);
+                double step_dt = base_dt * std::clamp(delta * delta, 0.0001, 1.0);
+
+                // Reduce step size when near the disk to avoid skipping through it
+                if (r_ks >= disk.inner_r * 0.8 && r_ks <= disk.outer_r * 1.2)
+                {
+                    const double h = disk.half_thickness(r_ks);
+                    const double y_dist = fabs(ray.pos.y());
+                    if (y_dist < 5.0 * h)
+                    {
+                        // Near disk plane: limit step to fraction of disk thickness
+                        step_dt = std::min(step_dt, std::max(0.3 * h, 0.005));
+                    }
+                }
+
                 if (!ray.advance(step_dt))
                 {
                     hit_black_hole = true;
                     break;
                 }
+
+                // Sample disk emission along the ray
+                const double prev_opacity = ray.accumulated_opacity;
+                ray.sample_disk(disk, step_dt);
+                if (ray.accumulated_opacity > prev_opacity)
+                    disk_samples.fetch_add(1, std::memory_order_relaxed);
+
                 affine += step_dt;
                 if (ray.has_crossed_event_horizon() || !std::isfinite(ray.vel.squaredNorm()))
                 {
@@ -73,6 +101,11 @@ int main()
                     break;
                 }
                 if (ray.distance_from_origin_squared() > escape_r2)
+                {
+                    break;
+                }
+                // Early exit if disk emission is already fully opaque
+                if (ray.accumulated_opacity > 0.99)
                 {
                     break;
                 }
@@ -86,14 +119,21 @@ int main()
 
             if (hit_black_hole)
             {
-                pixels[idx * 3 + 0] = 0;
-                pixels[idx * 3 + 1] = 0;
-                pixels[idx * 3 + 2] = 0;
+                // Behind horizon: just the accumulated disk emission (sky is black)
+                Vector3d color = ray.accumulated_color;
+                color = color.cwiseMax(0.0).cwiseMin(1.0);
+                pixels[idx * 3 + 0] = static_cast<BH_COLOR_CHANNEL_TYPE>(color.x() * 255);
+                pixels[idx * 3 + 1] = static_cast<BH_COLOR_CHANNEL_TYPE>(color.y() * 255);
+                pixels[idx * 3 + 2] = static_cast<BH_COLOR_CHANNEL_TYPE>(color.z() * 255);
                 continue;
             }
             else
             {
-                Vector3d color = ray.project_to_sky(*image);
+                // Composite: disk emission + transmittance * sky color
+                Vector3d sky_color = ray.project_to_sky(*image);
+                double transmittance = 1.0 - ray.accumulated_opacity;
+                Vector3d color = ray.accumulated_color + transmittance * sky_color;
+                color = color.cwiseMax(0.0).cwiseMin(1.0);
 
                 pixels[idx * 3 + 0] = static_cast<BH_COLOR_CHANNEL_TYPE>(color.x() * 255);
                 pixels[idx * 3 + 1] = static_cast<BH_COLOR_CHANNEL_TYPE>(color.y() * 255);
@@ -102,6 +142,7 @@ int main()
         }
     }
 
+    printf("Disk samples accumulated: %d\n", disk_samples.load());
     stbi_write_tga("output.tga", out_width, out_height, 3, pixels.data());
 
     return 0;
