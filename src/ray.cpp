@@ -236,25 +236,5 @@ void ray_s::sample_disk(const accretion_disk_s &disk, double ds)
 Vector3d ray_s::project_to_sky(sky_image_s &sky, const Matrix3d &sky_rot,
                                double offset_u, double offset_v)
 {
-    Vector3d dir_normalized = (sky_rot * vel).normalized();
-
-    double u = 0.5 - (atan2(dir_normalized.z(), dir_normalized.x()) / (2.0 * M_PI));
-    double v = 0.5 - (asin(dir_normalized.y()) / M_PI);
-
-    // Apply UV offsets and wrap to [0, 1)
-    u = u + offset_u;
-    v = v + offset_v;
-    u = u - floor(u);
-    v = std::clamp(v - floor(v), 0.0, 1.0 - 1e-9);
-
-    int x = std::clamp(static_cast<int>(u * sky.width), 0, sky.width - 1);
-    int y = std::clamp(static_cast<int>(v * sky.height), 0, sky.height - 1);
-
-    unsigned char r = sky.r(x, y);
-    unsigned char g = sky.g(x, y);
-    unsigned char b = sky.b(x, y);
-
-    return Vector3d(static_cast<double>(r) / 255.0,
-                    static_cast<double>(g) / 255.0,
-                    static_cast<double>(b) / 255.0);
+    return sample_sky(sky, vel, sky_rot, offset_u, offset_v);
 }

@@ -52,7 +52,6 @@ int main(int argc, char *argv[])
     const double fov_x = cfg.fov_x;
     const double fov_y = cfg.fov_y;
     const Vector3d camera_pos(cfg.camera_x, cfg.camera_y, cfg.camera_z);
-    const Vector3d camera_rot(cfg.camera_pitch, cfg.camera_yaw, cfg.camera_roll);
 
     // Precompute camera rotation matrix once (avoids trig per ray)
     const Matrix3d cam_rot_matrix = (AngleAxisd(cfg.camera_yaw * M_PI / 180.0, Vector3d::UnitY()) *
@@ -118,59 +117,8 @@ int main(int argc, char *argv[])
     // GPU render path: physics on GPU, sky mapping + post-proc on CPU
     // =================================================================
     {
-        GPUSceneParams gpu_params = {};
-
-        // Camera position
-        gpu_params.cam_pos[0] = cfg.camera_x;
-        gpu_params.cam_pos[1] = cfg.camera_y;
-        gpu_params.cam_pos[2] = cfg.camera_z;
-
-        // Camera rotation matrix (precomputed via Eigen)
-        const double gp_pitch = cfg.camera_pitch * M_PI / 180.0;
-        const double gp_yaw = cfg.camera_yaw * M_PI / 180.0;
-        const double gp_roll = cfg.camera_roll * M_PI / 180.0;
-        Matrix3d cam_rot = (AngleAxisd(gp_yaw, Vector3d::UnitY()) *
-                            AngleAxisd(gp_pitch, Vector3d::UnitX()) *
-                            AngleAxisd(gp_roll, Vector3d::UnitZ()))
-                               .toRotationMatrix();
-
-        // right = col(0), up = col(1), forward = col(2)
-        for (int i = 0; i < 3; i++)
-        {
-            gpu_params.cam_right[i] = cam_rot(i, 0);
-            gpu_params.cam_up[i] = cam_rot(i, 1);
-            gpu_params.cam_fwd[i] = cam_rot(i, 2);
-        }
-        gpu_params.fov_x = cfg.fov_x;
-        gpu_params.fov_y = cfg.fov_y;
-
-        // Black hole
-        gpu_params.bh_mass = cfg.bh_mass;
-        gpu_params.bh_spin = cfg.bh_spin;
-        gpu_params.r_plus = bh.event_horizon_radius();
-        gpu_params.r_isco = bh.isco_radius();
-
-        // Integration
-        gpu_params.base_dt = cfg.base_dt;
-        gpu_params.max_affine = cfg.max_affine;
-        gpu_params.escape_r2 = escape_r2;
-
-        // Disk
-        gpu_params.disk_inner_r = disk.inner_r;
-        gpu_params.disk_outer_r = disk.outer_r;
-        gpu_params.disk_thickness = cfg.disk_thickness;
-        gpu_params.disk_density0 = cfg.disk_density;
-        gpu_params.disk_opacity0 = cfg.disk_opacity;
-        gpu_params.disk_r_ref = sqrt(disk.inner_r * disk.outer_r);
-        gpu_params.disk_emission_boost = cfg.disk_emission_boost;
-        gpu_params.disk_color_variation = cfg.disk_color_variation;
-        gpu_params.disk_turbulence = cfg.disk_turbulence;
-        gpu_params.disk_time = cfg.time;
-
-        // Rendering
-        gpu_params.aa_grid = aa_grid;
-        gpu_params.width = out_width;
-        gpu_params.height = out_height;
+        GPUSceneParams gpu_params;
+        fill_gpu_params(gpu_params, cfg, bh, disk, cam_rot_matrix);
 
         // Launch GPU render
         std::vector<GPUPixelResult> gpu_results(num_pixels);
@@ -194,26 +142,10 @@ int main(int argc, char *argv[])
                 Vector3d exit_dir(gpu_results[i].exit_vx,
                                   gpu_results[i].exit_vy,
                                   gpu_results[i].exit_vz);
-                double len = exit_dir.norm();
-                if (len > 1e-12)
+                if (exit_dir.squaredNorm() > 1e-24)
                 {
-                    exit_dir /= len;
-                    Vector3d dir_rot = (sky_rot * exit_dir).normalized();
-
-                    double u = 0.5 - (atan2(dir_rot.z(), dir_rot.x()) / (2.0 * M_PI));
-                    double v = 0.5 - (asin(std::clamp(dir_rot.y(), -1.0, 1.0)) / M_PI);
-                    u += cfg.sky_offset_u;
-                    v += cfg.sky_offset_v;
-                    u -= floor(u);
-                    v = std::clamp(v - floor(v), 0.0, 1.0 - 1e-9);
-
-                    int sx = std::clamp((int)(u * image->width), 0, image->width - 1);
-                    int sy = std::clamp((int)(v * image->height), 0, image->height - 1);
-
-                    Vector3d sky_color(image->r(sx, sy) / 255.0,
-                                       image->g(sx, sy) / 255.0,
-                                       image->b(sx, sy) / 255.0);
-
+                    Vector3d sky_color = sample_sky(*image, exit_dir, sky_rot,
+                                                    cfg.sky_offset_u, cfg.sky_offset_v);
                     hdr_sky[i] = sky_color * cfg.sky_brightness *
                                  (double)gpu_results[i].sky_weight;
                 }
