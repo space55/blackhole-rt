@@ -21,9 +21,11 @@ endif()
 
 #configure_file("config.toml" "config.toml" COPYONLY)
 configure_file("hubble-skymap.jpg" "hubble-skymap.jpg" COPYONLY)
+configure_file("scene.txt" "scene.txt" COPYONLY)
 
 set(SOURCES
         src/main.cpp
+        src/scene.cpp
         src/sky.cpp
         src/ray.cpp
         src/disk.cpp

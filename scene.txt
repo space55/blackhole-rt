@@ -1,0 +1,51 @@
+# ============================================================================
+# Black Hole Ray Tracer — Scene Description
+# ============================================================================
+# Format:  key = value
+# Lines starting with # are comments.  Blank lines are ignored.
+# All values are plain numbers (doubles or ints as noted).
+# ============================================================================
+
+# --- Output -----------------------------------------------------------------
+output_width    = 1024          # image width  in pixels (int)
+output_height   = 512           # image height in pixels (int)
+output_file     = output.tga    # output filename
+
+# --- Sky map ----------------------------------------------------------------
+sky_image       = hubble-skymap.jpg
+
+# --- Camera -----------------------------------------------------------------
+camera_x        = -25.0         # camera position (Cartesian)
+camera_y        = 5.0
+camera_z        = 0.0
+camera_pitch    = 10.0          # rotation in degrees
+camera_yaw      = 90.0
+camera_roll     = 0.0
+fov_x           = 360.0         # horizontal field of view (degrees)
+fov_y           = 180.0         # vertical   field of view (degrees)
+
+# --- Black hole -------------------------------------------------------------
+bh_mass         = 1.0           # mass parameter M
+bh_spin         = 0.999         # spin  parameter a  (|a| < M)
+
+# --- Ray integration --------------------------------------------------------
+base_dt         = 0.1           # base integration step
+max_affine      = 100.0         # max affine parameter (ray lifetime)
+escape_radius   = 50.0          # rays beyond this radius are considered escaped
+
+# --- Accretion disk geometry ------------------------------------------------
+disk_outer_r    = 20.0          # outer edge in M
+disk_thickness  = 0.5           # half-thickness scale height
+disk_density    = 20.0          # base density ρ₀
+disk_opacity    = 0.5           # absorption per unit density κ₀
+
+# --- Accretion disk appearance ----------------------------------------------
+disk_emission_boost   = 10.0    # brightness multiplier (does not affect opacity)
+disk_color_variation  = 0.7     # 0 = physically accurate, 1 = full cinematic colour
+
+# --- Tone mapping -----------------------------------------------------------
+# Inverse-logarithmic compression applied to disk emission.
+#   0.0 = linear (true-to-life, physically accurate)
+#   0.5 = moderate lift
+#   1.0 = heavy compression (Interstellar / movie look)
+tonemap_compression   = 1.0

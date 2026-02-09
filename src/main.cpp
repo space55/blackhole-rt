@@ -10,62 +10,64 @@
 #include "ray.h"
 #include "disk.h"
 #include "blackhole.h"
+#include "scene.h"
 
 #include "stb_image_write.h"
 
-int main()
+int main(int argc, char *argv[])
 {
-    sky_image_s *image = load_sky_image("hubble-skymap.jpg");
+    // --- Load scene config ------------------------------------------------
+    const char *scene_path = (argc > 1) ? argv[1] : "scene.txt";
+    scene_config_s cfg;
+    if (!load_scene_config(scene_path, cfg))
+    {
+        printf("Warning: could not open '%s', using built-in defaults\n", scene_path);
+    }
+    else
+    {
+        printf("Loaded scene: %s\n", scene_path);
+    }
+    print_scene_config(cfg);
+
+    // --- Sky image -------------------------------------------------------
+    sky_image_s *image = load_sky_image(cfg.sky_image.c_str());
     if (!image)
     {
-        printf("Failed to load sky image\n");
+        printf("Failed to load sky image: %s\n", cfg.sky_image.c_str());
         return 1;
     }
-
     printf("Loaded sky image: %dx%d\n", image->width, image->height);
 
-    // const int out_width = image->width;
-    // const int out_height = image->height;
-    const int out_width = 1024;
-    const int out_height = 512;
-    const double base_dt = 0.1;
-    const double max_affine = 100.0;
-    const double escape_r2 = 2500.0; // r=50, where H~0.0004 (negligible curvature)
-    const double fov_x = 120.0;
-    const double fov_y = 60.0;
-    const Vector3d camera_pos(-25, 5, 0);
-    // const Vector3d camera_rot(5, 70, -20); // pitch, yaw, roll in degrees
-    const Vector3d camera_rot(10, 90, 0); // pitch, yaw, roll in degrees
-    const double bh_mass = 1.0;
-    const double bh_spin = 0.999;
+    // --- Derived constants from config -----------------------------------
+    const int out_width = cfg.output_width;
+    const int out_height = cfg.output_height;
+    const double base_dt = cfg.base_dt;
+    const double max_affine = cfg.max_affine;
+    const double escape_r2 = cfg.escape_radius * cfg.escape_radius;
+    const double fov_x = cfg.fov_x;
+    const double fov_y = cfg.fov_y;
+    const Vector3d camera_pos(cfg.camera_x, cfg.camera_y, cfg.camera_z);
+    const Vector3d camera_rot(cfg.camera_pitch, cfg.camera_yaw, cfg.camera_roll);
 
     std::vector<BH_COLOR_CHANNEL_TYPE> pixels(static_cast<size_t>(out_width) * static_cast<size_t>(out_height) * 3);
 
     const int total_pixels = out_width * out_height;
     std::atomic<int> pixels_done(0);
 
-    blackhole_s bh(bh_mass, bh_spin);
+    blackhole_s bh(cfg.bh_mass, cfg.bh_spin);
     printf("Black hole: M=%.1f, a=%.2f, r+=%.4f, r_isco=%.4f\n",
            bh.mass, bh.spin, bh.event_horizon_radius(), bh.isco_radius());
 
     const double r_plus = bh.event_horizon_radius();
 
-    // Accretion disk: outer_r=20M, half-thickness scale=0.5, density=20.0, opacity=0.5
-    accretion_disk_s disk(&bh, 20.0, 0.5, 20.0, 0.5);
-    disk.emission_boost = 10.0; // <-- Tweak this to make the disk brighter/dimmer
-    printf("Disk: inner_r=%.3f M, outer_r=%.1f M, boost=%.1f\n",
-           disk.inner_r, disk.outer_r, disk.emission_boost);
+    // --- Accretion disk --------------------------------------------------
+    accretion_disk_s disk(&bh, cfg.disk_outer_r, cfg.disk_thickness,
+                          cfg.disk_density, cfg.disk_opacity);
+    disk.emission_boost = cfg.disk_emission_boost;
+    disk.color_variation = cfg.disk_color_variation;
 
-    // -----------------------------------------------------------------------
-    // Inverse-logarithmic tone curve for the accretion disk
-    //   compression = 0.0  → linear (true-to-life, physically accurate)
-    //   compression = 0.5  → moderate lift (good middle ground)
-    //   compression = 1.0  → heavy log compression (Interstellar / movie look)
-    // The curve is:  out = log(1 + c*in) / log(1 + c)
-    // where c = 10^(compression * 2) - 1, smoothly interpolating from
-    // identity at 0 to strong shadow-lift at 1.
-    // -----------------------------------------------------------------------
-    const double disk_tonemap_compression = 0.7; // <-- Tweak: 0 = true-to-life, 1 = cinematic
+    // --- Tone mapping ----------------------------------------------------
+    const double disk_tonemap_compression = cfg.tonemap_compression;
     const double tonemap_c = pow(10.0, disk_tonemap_compression * 2.0) - 1.0;
     const double tonemap_norm = 1.0 / log(1.0 + tonemap_c);
     auto tonemap_disk = [&](const Vector3d &hdr) -> Vector3d
@@ -179,7 +181,8 @@ int main()
     }
 
     printf("Disk samples accumulated: %d\n", disk_samples.load());
-    stbi_write_tga("output.tga", out_width, out_height, 3, pixels.data());
+    stbi_write_tga(cfg.output_file.c_str(), out_width, out_height, 3, pixels.data());
+    printf("Wrote %s\n", cfg.output_file.c_str());
 
     return 0;
 }

@@ -184,22 +184,63 @@ double accretion_disk_s::temperature(const Vector3d &pos) const
 }
 
 // ---------------------------------------------------------------------------
-// Blackbody temperature to RGB
+// Blackbody temperature to RGB — enriched palette
+// Low T: deep red/crimson → orange → gold → white-hot → blue-white at high T
 // ---------------------------------------------------------------------------
 Vector3d accretion_disk_s::temperature_to_rgb(double T)
 {
     T = std::clamp(T, 0.0, 2.0);
 
+    // Piecewise spline-ish mapping for a richer colour gradient
     double r, g, b;
-    r = std::clamp(1.5 * T, 0.0, 1.0);
-    g = std::clamp(1.5 * (T - 0.2), 0.0, 1.0);
-    b = std::clamp(2.0 * (T - 0.4), 0.0, 1.0);
+
+    if (T < 0.15)
+    {
+        // Very cool: deep crimson / ember
+        r = std::clamp(T / 0.15 * 0.4, 0.0, 0.4);
+        g = 0.0;
+        b = 0.0;
+    }
+    else if (T < 0.4)
+    {
+        // Warm: crimson → orange
+        double t = (T - 0.15) / 0.25;
+        r = 0.4 + 0.6 * t;
+        g = 0.25 * t * t;
+        b = 0.0;
+    }
+    else if (T < 0.7)
+    {
+        // Hot: orange → gold / yellow
+        double t = (T - 0.4) / 0.3;
+        r = 1.0;
+        g = 0.25 + 0.55 * t;
+        b = 0.05 * t;
+    }
+    else if (T < 1.0)
+    {
+        // Very hot: gold → white
+        double t = (T - 0.7) / 0.3;
+        r = 1.0;
+        g = 0.8 + 0.2 * t;
+        b = 0.05 + 0.95 * t;
+    }
+    else
+    {
+        // Superhot: white → blue-white
+        double t = std::min((T - 1.0) / 1.0, 1.0);
+        r = 1.0 - 0.15 * t;
+        g = 1.0 - 0.05 * t;
+        b = 1.0;
+    }
 
     return Vector3d(r, g, b);
 }
 
 // ---------------------------------------------------------------------------
-// Emissivity: thermal emission j = emission_boost * rho * T^4 * color(T)
+// Emissivity: thermal emission with optional cinematic color variation
+//   color_variation = 0.0 → physically based (temperature color only)
+//   color_variation = 1.0 → full cinematic (azimuthal & radial hue shifts)
 // ---------------------------------------------------------------------------
 Vector3d accretion_disk_s::emissivity(const Vector3d &pos) const
 {
@@ -212,7 +253,37 @@ Vector3d accretion_disk_s::emissivity(const Vector3d &pos) const
         return Vector3d(0, 0, 0);
 
     const double T4 = T * T * T * T;
-    const Vector3d color = temperature_to_rgb(T);
+    Vector3d color = temperature_to_rgb(T);
+
+    // --- Cinematic color tint (controlled by color_variation) -------------
+    if (color_variation > 1e-6)
+    {
+        const double r_ks = bh->ks_radius(pos);
+        const double x = pos.x(), z = pos.z();
+        const double phi = atan2(z, x);
+        const double log_r = log(std::max(r_ks, 1e-6));
+        const double r_norm = std::clamp((r_ks - inner_r) / (outer_r - inner_r), 0.0, 1.0);
+        const double cv = color_variation;
+
+        // Hue angle: sweeps through colour wheel based on position
+        // Spiral-following so colour bands align with the streak pattern
+        const double hue = 0.6 * sin(2.0 * phi - 4.5 * log_r + 0.5) + 0.4 * sin(3.0 * phi - 7.0 * log_r + 2.1) + 0.3 * cos(5.0 * phi - 10.0 * log_r + 1.7);
+
+        // Radial colour gradient: inner = blue-white boost, outer = deep amber
+        const double radial_hue = 1.0 - 2.0 * r_norm; // +1 inner, -1 outer
+
+        // Combined tint offsets for each channel
+        // Red:   boosted at outer radii and in "warm" spiral bands
+        // Green: slight modulation for gold/amber richness
+        // Blue:  boosted at inner radii and in "cool" spiral bands
+        const double dr = cv * (0.15 * (-radial_hue) + 0.12 * hue);
+        const double dg = cv * (0.08 * hue * radial_hue);
+        const double db = cv * (0.20 * radial_hue + 0.10 * (-hue));
+
+        color.x() = std::clamp(color.x() + dr, 0.0, 1.0);
+        color.y() = std::clamp(color.y() + dg, 0.0, 1.0);
+        color.z() = std::clamp(color.z() + db, 0.0, 1.0);
+    }
 
     return emission_boost * rho * T4 * color;
 }

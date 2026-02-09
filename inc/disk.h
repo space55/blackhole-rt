@@ -8,12 +8,13 @@ struct accretion_disk_s
 {
     const blackhole_s *bh;
 
-    double inner_r;              // Inner edge (ISCO or custom)
-    double outer_r;              // Outer edge
-    double thickness;            // Half-thickness scale height at reference radius
-    double density0;             // Base density scale
-    double opacity0;             // Base opacity scale (absorption per unit density)
-    double emission_boost = 1.0; // Multiplier for visual brightness (does not affect opacity)
+    double inner_r;               // Inner edge (ISCO or custom)
+    double outer_r;               // Outer edge
+    double thickness;             // Half-thickness scale height at reference radius
+    double density0;              // Base density scale
+    double opacity0;              // Base opacity scale (absorption per unit density)
+    double emission_boost = 1.0;  // Multiplier for visual brightness (does not affect opacity)
+    double color_variation = 0.0; // 0 = physically accurate, 1 = full cinematic color palette
 
     // Construct with ISCO as default inner radius
     accretion_disk_s(const blackhole_s *black_hole, double r_outer, double h, double rho0, double kappa0);
