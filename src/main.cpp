@@ -9,6 +9,7 @@
 #include "sky.h"
 #include "ray.h"
 #include "disk.h"
+#include "blackhole.h"
 
 #include "stb_image_write.h"
 
@@ -32,19 +33,28 @@ int main()
     const double escape_r2 = 2500.0; // r=50, where H~0.0004 (negligible curvature)
     const double fov_x = 360.0;
     const double fov_y = 180.0;
+    const Vector3d camera_pos(-15, 3, 0);
+    // const Vector3d camera_rot(5, 70, -20); // pitch, yaw, roll in degrees
+    const Vector3d camera_rot(0, 90, 0); // pitch, yaw, roll in degrees
+    const double bh_mass = 1.0;
+    const double bh_spin = 0.999;
 
     std::vector<BH_COLOR_CHANNEL_TYPE> pixels(static_cast<size_t>(out_width) * static_cast<size_t>(out_height) * 3);
 
     const int total_pixels = out_width * out_height;
     std::atomic<int> pixels_done(0);
 
-    const double r_plus = ray_s::event_horizon_radius();
+    blackhole_s bh(bh_mass, bh_spin);
+    printf("Black hole: M=%.1f, a=%.2f, r+=%.4f, r_isco=%.4f\n",
+           bh.mass, bh.spin, bh.event_horizon_radius(), bh.isco_radius());
+
+    const double r_plus = bh.event_horizon_radius();
 
     // Accretion disk: outer_r=20M, half-thickness scale=0.5, density=20.0, opacity=0.5
-    accretion_disk_s disk(1.0, 0.99, 20.0, 0.5, 20.0, 0.5);
+    accretion_disk_s disk(&bh, 20.0, 0.5, 20.0, 0.5);
     disk.emission_boost = 10.0; // <-- Tweak this to make the disk brighter/dimmer
-    printf("Disk ISCO: %.3f M, inner_r: %.3f M, outer_r: %.1f M, boost: %.1f\n",
-           accretion_disk_s::isco_radius(1.0, 0.99), disk.inner_r, disk.outer_r, disk.emission_boost);
+    printf("Disk: inner_r=%.3f M, outer_r=%.1f M, boost=%.1f\n",
+           disk.inner_r, disk.outer_r, disk.emission_boost);
 
     std::atomic<int> disk_samples(0);
 
@@ -56,8 +66,9 @@ int main()
             bool hit_black_hole = false;
             const int idx = y * out_width + x;
 
-            ray_s ray(Vector3d(-15, 2, 0),
-                      Vector3d(15, 90, 0),
+            ray_s ray(&bh,
+                      camera_pos,
+                      camera_rot,
                       (static_cast<double>(x) / out_width),
                       (static_cast<double>(y) / out_height),
                       fov_x,

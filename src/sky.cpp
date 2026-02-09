@@ -4,7 +4,7 @@
 sky_image_s *load_sky_image(const char *filename)
 {
     int width = 0, height = 0, channels = 0;
-    unsigned char *rgba = stbi_load("hubble-skymap.jpg", &width, &height, &channels, 4);
+    unsigned char *rgba = stbi_load(filename, &width, &height, &channels, 4);
     if (!rgba)
     {
         fprintf(stderr, "Failed to load image\n");

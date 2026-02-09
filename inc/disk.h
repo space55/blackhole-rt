@@ -2,27 +2,21 @@
 #ifndef _BH_DISK_H
 #define _BH_DISK_H
 
-#include "common.h"
+#include "blackhole.h"
 
 struct accretion_disk_s
 {
-    double mass;      // Black hole mass M
-    double spin;      // Black hole spin a
-    double inner_r;   // Inner edge (ISCO or custom)
-    double outer_r;   // Outer edge
-    double thickness; // Half-thickness scale height at reference radius
-    double density0;  // Base density scale
-    double opacity0;  // Base opacity scale (absorption per unit density)
+    const blackhole_s *bh;
+
+    double inner_r;              // Inner edge (ISCO or custom)
+    double outer_r;              // Outer edge
+    double thickness;            // Half-thickness scale height at reference radius
+    double density0;             // Base density scale
+    double opacity0;             // Base opacity scale (absorption per unit density)
     double emission_boost = 1.0; // Multiplier for visual brightness (does not affect opacity)
 
     // Construct with ISCO as default inner radius
-    accretion_disk_s(double M, double a, double r_outer, double h, double rho0, double kappa0);
-
-    // Compute the ISCO radius for Kerr
-    static double isco_radius(double M, double a);
-
-    // Kerr-Schild radius from Cartesian position (spin axis = y)
-    double ks_radius(const Vector3d &pos) const;
+    accretion_disk_s(const blackhole_s *black_hole, double r_outer, double h, double rho0, double kappa0);
 
     // Disk half-thickness at a given KS radius (flared disk: h ~ r)
     double half_thickness(double r_ks) const;
@@ -46,8 +40,6 @@ struct accretion_disk_s
     Vector4d gas_four_velocity(const Vector3d &pos) const;
 
     // Redshift factor g = (k_mu u^mu)_obs / (k_mu u^mu)_emit
-    // k is the photon 4-momentum, u_emit is the gas 4-velocity
-    // observer is assumed static at infinity (u_obs = (-1,0,0,0) in KS)
     static double redshift_factor(const Vector4d &photon_k, const Vector4d &gas_u,
                                   const Matrix4d &g_metric);
 
