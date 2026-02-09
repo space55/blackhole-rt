@@ -77,12 +77,13 @@ bool ray_s::advance(double dt)
 {
     const double r_plus = bh->event_horizon_radius();
 
-    if (cached_ks_r > 4.0 * r_plus)
+    if (cached_ks_r > 30.0 * r_plus)
     {
         // ---------------------------------------------------------------
         // Far-field: RK2 midpoint method (2 geodesic_accel evaluations
-        // instead of 4).  Curvature is weak at large r so 2nd-order
-        // accuracy is sufficient; this halves the work for ~70% of steps.
+        // instead of 4).  Only beyond 30*r+ where curvature is truly
+        // negligible — keeps the RK2/RK4 boundary well past the disk
+        // edge so no accuracy artifacts appear in the image.
         // ---------------------------------------------------------------
         double r1;
         Vector3d a1 = bh->geodesic_accel(pos, vel, &r1);

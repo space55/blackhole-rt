@@ -137,9 +137,7 @@ int main(int argc, char *argv[])
                         // Use cached Kerr-Schild radius for step sizing (updated by advance())
                         const double r_ks = ray.cached_ks_r;
                         const double delta = std::max(r_ks - r_plus, 0.01);
-                        // Near BH: quadratic scaling (tiny steps). Far: linear in r, up to 10×.
-                        double step_dt = base_dt * std::clamp(delta * delta, 0.0001,
-                                                              std::min(std::max(delta, 1.0), 10.0));
+                        double step_dt = base_dt * std::clamp(delta * delta, 0.0001, 1.0);
 
                         // Reduce step size when near the disk to avoid skipping through it
                         if (r_ks >= disk.inner_r * 0.8 && r_ks <= disk.outer_r * 1.2)
