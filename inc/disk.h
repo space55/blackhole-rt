@@ -13,6 +13,7 @@ struct accretion_disk_s
     double thickness; // Half-thickness scale height at reference radius
     double density0;  // Base density scale
     double opacity0;  // Base opacity scale (absorption per unit density)
+    double emission_boost = 1.0; // Multiplier for visual brightness (does not affect opacity)
 
     // Construct with ISCO as default inner radius
     accretion_disk_s(double M, double a, double r_outer, double h, double rho0, double kappa0);

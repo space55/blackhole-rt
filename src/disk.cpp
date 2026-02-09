@@ -162,8 +162,8 @@ Vector3d accretion_disk_s::emissivity(const Vector3d &pos) const
     const double T4 = T * T * T * T;
     const Vector3d color = temperature_to_rgb(T);
 
-    // Emissivity proportional to density * T^4
-    return rho * T4 * color;
+    // Emissivity proportional to density * T^4, scaled by emission_boost
+    return emission_boost * rho * T4 * color;
 }
 
 // ---------------------------------------------------------------------------

@@ -42,8 +42,9 @@ int main()
 
     // Accretion disk: outer_r=20M, half-thickness scale=0.5, density=20.0, opacity=0.5
     accretion_disk_s disk(1.0, 0.99, 20.0, 0.5, 20.0, 0.5);
-    printf("Disk ISCO: %.3f M, inner_r: %.3f M, outer_r: %.1f M\n",
-           accretion_disk_s::isco_radius(1.0, 0.99), disk.inner_r, disk.outer_r);
+    disk.emission_boost = 10.0; // <-- Tweak this to make the disk brighter/dimmer
+    printf("Disk ISCO: %.3f M, inner_r: %.3f M, outer_r: %.1f M, boost: %.1f\n",
+           accretion_disk_s::isco_radius(1.0, 0.99), disk.inner_r, disk.outer_r, disk.emission_boost);
 
     std::atomic<int> disk_samples(0);
 
