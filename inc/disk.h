@@ -24,6 +24,9 @@ struct accretion_disk_s
     // Is this Cartesian point inside the disk volume?
     bool contains(const Vector3d &pos) const;
 
+    // Procedural clump/streak modulation (multi-scale trailing spirals)
+    double clump_factor(const Vector3d &pos) const;
+
     // Gas density at a point (power-law in r, Gaussian falloff in height)
     double density(const Vector3d &pos) const;
 

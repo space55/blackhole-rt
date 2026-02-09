@@ -31,11 +31,11 @@ int main()
     const double base_dt = 0.1;
     const double max_affine = 100.0;
     const double escape_r2 = 2500.0; // r=50, where H~0.0004 (negligible curvature)
-    const double fov_x = 360.0;
-    const double fov_y = 180.0;
-    const Vector3d camera_pos(-15, 3, 0);
+    const double fov_x = 120.0;
+    const double fov_y = 60.0;
+    const Vector3d camera_pos(-25, 5, 0);
     // const Vector3d camera_rot(5, 70, -20); // pitch, yaw, roll in degrees
-    const Vector3d camera_rot(0, 90, 0); // pitch, yaw, roll in degrees
+    const Vector3d camera_rot(10, 90, 0); // pitch, yaw, roll in degrees
     const double bh_mass = 1.0;
     const double bh_spin = 0.999;
 
@@ -55,6 +55,30 @@ int main()
     disk.emission_boost = 10.0; // <-- Tweak this to make the disk brighter/dimmer
     printf("Disk: inner_r=%.3f M, outer_r=%.1f M, boost=%.1f\n",
            disk.inner_r, disk.outer_r, disk.emission_boost);
+
+    // -----------------------------------------------------------------------
+    // Inverse-logarithmic tone curve for the accretion disk
+    //   compression = 0.0  → linear (true-to-life, physically accurate)
+    //   compression = 0.5  → moderate lift (good middle ground)
+    //   compression = 1.0  → heavy log compression (Interstellar / movie look)
+    // The curve is:  out = log(1 + c*in) / log(1 + c)
+    // where c = 10^(compression * 2) - 1, smoothly interpolating from
+    // identity at 0 to strong shadow-lift at 1.
+    // -----------------------------------------------------------------------
+    const double disk_tonemap_compression = 0.7; // <-- Tweak: 0 = true-to-life, 1 = cinematic
+    const double tonemap_c = pow(10.0, disk_tonemap_compression * 2.0) - 1.0;
+    const double tonemap_norm = 1.0 / log(1.0 + tonemap_c);
+    auto tonemap_disk = [&](const Vector3d &hdr) -> Vector3d
+    {
+        if (tonemap_c < 1e-6)
+            return hdr; // compression ≈ 0 → identity
+        return Vector3d(
+            log(1.0 + tonemap_c * std::max(hdr.x(), 0.0)) * tonemap_norm,
+            log(1.0 + tonemap_c * std::max(hdr.y(), 0.0)) * tonemap_norm,
+            log(1.0 + tonemap_c * std::max(hdr.z(), 0.0)) * tonemap_norm);
+    };
+    printf("Disk tone-map: compression=%.2f  (c=%.2f)\n",
+           disk_tonemap_compression, tonemap_c);
 
     std::atomic<int> disk_samples(0);
 
@@ -132,7 +156,7 @@ int main()
             if (hit_black_hole)
             {
                 // Behind horizon: just the accumulated disk emission (sky is black)
-                Vector3d color = ray.accumulated_color;
+                Vector3d color = tonemap_disk(ray.accumulated_color);
                 color = color.cwiseMax(0.0).cwiseMin(1.0);
                 pixels[idx * 3 + 0] = static_cast<BH_COLOR_CHANNEL_TYPE>(color.x() * 255);
                 pixels[idx * 3 + 1] = static_cast<BH_COLOR_CHANNEL_TYPE>(color.y() * 255);
@@ -141,10 +165,10 @@ int main()
             }
             else
             {
-                // Composite: disk emission + transmittance * sky color
+                // Composite: tone-mapped disk emission + transmittance * sky color
                 Vector3d sky_color = ray.project_to_sky(*image);
                 double transmittance = 1.0 - ray.accumulated_opacity;
-                Vector3d color = ray.accumulated_color + transmittance * sky_color;
+                Vector3d color = tonemap_disk(ray.accumulated_color) + transmittance * sky_color;
                 color = color.cwiseMax(0.0).cwiseMin(1.0);
 
                 pixels[idx * 3 + 0] = static_cast<BH_COLOR_CHANNEL_TYPE>(color.x() * 255);

@@ -30,12 +30,96 @@ double accretion_disk_s::half_thickness(double r_ks) const
 bool accretion_disk_s::contains(const Vector3d &pos) const
 {
     const double r_ks = bh->ks_radius(pos);
-    if (r_ks < inner_r || r_ks > outer_r)
+    // Allow a fade zone extending 20% past outer_r for smooth falloff
+    const double fade_limit = outer_r * 1.2;
+    if (r_ks < inner_r || r_ks > fade_limit)
         return false;
 
-    const double h = half_thickness(r_ks);
+    const double h = half_thickness(std::min(r_ks, outer_r));
     const double height = fabs(pos.y());
     return height <= 3.0 * h;
+}
+
+// ---------------------------------------------------------------------------
+// Procedural clump / streak modulation
+// Multi-scale trailing logarithmic spirals simulate turbulent clumps that
+// have been sheared into elongated streaks by differential rotation, giving
+// an Interstellar-style inhomogeneous disk appearance.
+// ---------------------------------------------------------------------------
+double accretion_disk_s::clump_factor(const Vector3d &pos) const
+{
+    const double r_ks = bh->ks_radius(pos);
+    if (r_ks < inner_r || r_ks > outer_r)
+        return 1.0;
+
+    const double x = pos.x(), z = pos.z();
+    const double y = pos.y();
+    const double phi = atan2(z, x);
+    const double log_r = log(r_ks);
+    const double r_norm = (r_ks - inner_r) / (outer_r - inner_r);
+
+    // --- Height-dependent phase offset -----------------------------------
+    // Without this, the clump pattern is constant along vertical columns,
+    // producing vertical striping when viewed edge-on.  Adding a phase
+    // shift proportional to height makes the pattern tilt so that streaks
+    // are coherent *along the orbital plane* (horizontal from the side).
+    // Physically: turbulent eddies at different heights are at different
+    // azimuthal phases due to vertical shear.
+    const double h = half_thickness(r_ks);
+    const double y_over_h = (h > 1e-12) ? (y / h) : 0.0;
+    // Large tilt so the pattern is clearly horizontal, not vertical
+    const double y_phase = 3.0 * y_over_h;
+
+    // --- Helper: sharp streak function -----------------------------------
+    // Raises sin^2 to a power to create narrow bright streaks on a darker
+    // background, rather than gentle sinusoidal undulations.
+    auto streak = [](double phase, double sharpness) -> double
+    {
+        const double s = sin(phase);
+        return pow(s * s, sharpness); // 0..1, narrow peaks
+    };
+
+    double mod = 0.0;
+
+    // === LARGE-SCALE: 2 dominant trailing spiral arms ====================
+    // Use a sharpened streak so these read as distinct bright arcs
+    mod += 1.4 * streak(2.0 * phi - 4.5 * log_r + 0.5 + y_phase, 3.0);
+
+    // === SECONDARY: 3-arm spiral, offset phase ===========================
+    mod += 0.7 * streak(3.0 * phi - 7.0 * log_r + 2.1 + 1.5 * y_phase, 2.5);
+
+    // === MEDIUM: sheared turbulent clumps → azimuthal streaks =============
+    mod += 0.45 * streak(7.0 * phi - 13.0 * log_r + 1.3 + 2.0 * y_phase, 2.0);
+    mod += 0.35 * streak(11.0 * phi - 19.0 * log_r - 0.8 + 2.5 * y_phase, 2.0);
+
+    // === FINE: high-frequency turbulent streaks ===========================
+    mod += 0.25 * sin(17.0 * phi - 25.0 * log_r + 3.7 + 3.0 * y_phase);
+    mod += 0.15 * sin(23.0 * phi - 33.0 * log_r + 0.4 + 4.0 * y_phase);
+    mod += 0.10 * sin(31.0 * phi - 45.0 * log_r + 5.2 + 5.0 * y_phase);
+
+    // === RADIAL hot-spot rings × spiral ==================================
+    mod += 0.40 * streak(5.0 * r_ks + 1.0 + 0.5 * y_phase, 2.0) *
+           cos(3.0 * phi - 5.0 * log_r + y_phase);
+
+    // === BRIGHT KNOTS: cross-term localised clumps =======================
+    mod += 0.35 * streak(4.0 * M_PI * r_norm, 2.0) *
+           streak(9.0 * phi - 14.0 * log_r + 1.9 + 2.0 * y_phase, 2.0);
+
+    // === DARK LANES: subtract narrow dark gaps between bright streaks =====
+    mod -= 0.50 * streak(5.0 * phi - 8.0 * log_r + 4.0 + 1.8 * y_phase, 4.0);
+    mod -= 0.30 * streak(8.0 * phi - 15.0 * log_r + 0.7 + 2.2 * y_phase, 5.0);
+
+    // === RADIAL BRIGHTNESS ENVELOPE: fade inner/outer edges ==============
+    // Boost mid-disk contrast; let edges be calmer
+    const double envelope = 4.0 * r_norm * (1.0 - r_norm); // parabola 0..1..0
+    mod *= (0.4 + 0.6 * envelope);
+
+    // Shift baseline down so the "background" disk is dimmer and streaks
+    // punch up from it, giving much more obvious contrast
+    const double factor = 0.35 + 0.65 * std::max(mod, 0.0);
+
+    // Clamp so we never go fully black (some residual glow)
+    return std::clamp(factor, 0.02, 3.0);
 }
 
 // ---------------------------------------------------------------------------
@@ -44,10 +128,11 @@ bool accretion_disk_s::contains(const Vector3d &pos) const
 double accretion_disk_s::density(const Vector3d &pos) const
 {
     const double r_ks = bh->ks_radius(pos);
-    if (r_ks < inner_r || r_ks > outer_r)
+    const double fade_limit = outer_r * 1.2;
+    if (r_ks < inner_r || r_ks > fade_limit)
         return 0.0;
 
-    const double h = half_thickness(r_ks);
+    const double h = half_thickness(std::min(r_ks, outer_r));
     if (h < 1e-12)
         return 0.0;
 
@@ -55,7 +140,15 @@ double accretion_disk_s::density(const Vector3d &pos) const
     const double radial = pow(inner_r / r_ks, 1.5);
     const double vertical = exp(-0.5 * (height * height) / (h * h));
 
-    return density0 * radial * vertical;
+    // Smooth exponential taper beyond outer_r
+    double outer_fade = 1.0;
+    if (r_ks > outer_r)
+    {
+        const double fade_width = 0.1 * outer_r; // fade over ~10% of outer_r
+        outer_fade = exp(-(r_ks - outer_r) * (r_ks - outer_r) / (2.0 * fade_width * fade_width));
+    }
+
+    return density0 * radial * vertical * clump_factor(pos) * outer_fade;
 }
 
 // ---------------------------------------------------------------------------
@@ -64,7 +157,8 @@ double accretion_disk_s::density(const Vector3d &pos) const
 double accretion_disk_s::temperature(const Vector3d &pos) const
 {
     const double r_ks = bh->ks_radius(pos);
-    if (r_ks < inner_r || r_ks > outer_r)
+    const double fade_limit = outer_r * 1.2;
+    if (r_ks < inner_r || r_ks > fade_limit)
         return 0.0;
 
     const double x_ratio = r_ks / inner_r;
@@ -78,7 +172,15 @@ double accretion_disk_s::temperature(const Vector3d &pos) const
                             (1.0 - sqrt(1.0 / peak_x));
     const double T4 = T_max * factor / peak_val;
 
-    return std::max(pow(std::max(T4, 0.0), 0.25), 0.0);
+    // Smooth fade beyond outer_r (matches density fade)
+    double outer_fade = 1.0;
+    if (r_ks > outer_r)
+    {
+        const double fade_width = 0.1 * outer_r;
+        outer_fade = exp(-(r_ks - outer_r) * (r_ks - outer_r) / (2.0 * fade_width * fade_width));
+    }
+
+    return std::max(pow(std::max(T4 * outer_fade, 0.0), 0.25), 0.0);
 }
 
 // ---------------------------------------------------------------------------
