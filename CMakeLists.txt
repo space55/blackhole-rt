@@ -45,9 +45,6 @@ set(SOURCES
         src/main.cpp
         src/scene.cpp
         src/sky.cpp
-        src/ray.cpp
-        src/disk.cpp
-        src/blackhole.cpp
         src/stb_impl.cpp
 )
 

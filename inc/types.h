@@ -3,8 +3,6 @@
 #ifndef _BH_TYPES_H
 #define _BH_TYPES_H
 
-#include "common.h"
-
 #define BH_COLOR_CHANNEL_TYPE unsigned char
 
 struct sky_image_s

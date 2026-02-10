@@ -4,13 +4,11 @@
 #include <atomic>
 #include <chrono>
 #include <cmath>
+#include <vector>
 
-#include "common.h"
+#include "physics.h"
 #include "types.h"
 #include "sky.h"
-#include "ray.h"
-#include "disk.h"
-#include "blackhole.h"
 #include "scene.h"
 
 #include "stb_image_write.h"
@@ -43,6 +41,17 @@ int main(int argc, char *argv[])
     }
     printf("Loaded sky image: %dx%d\n", image->width, image->height);
 
+    // --- Physics parameters (replaces blackhole_s + accretion_disk_s) ----
+    PhysicsParams pp = make_physics_params(
+        cfg.bh_mass, cfg.bh_spin,
+        cfg.disk_outer_r, cfg.disk_thickness,
+        cfg.disk_density, cfg.disk_opacity,
+        cfg.disk_emission_boost, cfg.disk_color_variation,
+        cfg.disk_turbulence, cfg.time);
+
+    printf("Black hole: M=%.1f, a=%.2f, r+=%.4f, r_isco=%.4f\n",
+           pp.bh_mass, pp.bh_spin, pp.r_plus, pp.disk_inner_r);
+
     // --- Derived constants from config -----------------------------------
     const int out_width = cfg.output_width;
     const int out_height = cfg.output_height;
@@ -51,52 +60,46 @@ int main(int argc, char *argv[])
     const double escape_r2 = cfg.escape_radius * cfg.escape_radius;
     const double fov_x = cfg.fov_x;
     const double fov_y = cfg.fov_y;
-    const Vector3d camera_pos(cfg.camera_x, cfg.camera_y, cfg.camera_z);
+    const dvec3 camera_pos(cfg.camera_x, cfg.camera_y, cfg.camera_z);
 
     // Precompute camera rotation matrix once (avoids trig per ray)
-    const Matrix3d cam_rot_matrix = (AngleAxisd(cfg.camera_yaw * M_PI / 180.0, Vector3d::UnitY()) *
-                                     AngleAxisd(cfg.camera_pitch * M_PI / 180.0, Vector3d::UnitX()) *
-                                     AngleAxisd(cfg.camera_roll * M_PI / 180.0, Vector3d::UnitZ()))
-                                        .toRotationMatrix();
+    const dmat3 cam_rot_matrix = dmat3::rotation_y(cfg.camera_yaw * M_PI / 180.0) *
+                                 dmat3::rotation_x(cfg.camera_pitch * M_PI / 180.0) *
+                                 dmat3::rotation_z(cfg.camera_roll * M_PI / 180.0);
+
+    // Extract camera basis vectors
+    const dvec3 cam_right = cam_rot_matrix.col(0);
+    const dvec3 cam_up    = cam_rot_matrix.col(1);
+    const dvec3 cam_fwd   = cam_rot_matrix.col(2);
 
     // Precompute sky rotation matrix
-    const Matrix3d sky_rot = (AngleAxisd(cfg.sky_yaw * M_PI / 180.0, Vector3d::UnitY()) * AngleAxisd(cfg.sky_pitch * M_PI / 180.0, Vector3d::UnitX()) * AngleAxisd(cfg.sky_roll * M_PI / 180.0, Vector3d::UnitZ())).toRotationMatrix();
+    const dmat3 sky_rot = dmat3::rotation_y(cfg.sky_yaw * M_PI / 180.0) *
+                          dmat3::rotation_x(cfg.sky_pitch * M_PI / 180.0) *
+                          dmat3::rotation_z(cfg.sky_roll * M_PI / 180.0);
 
     // HDR framebuffers: disk emission separate from sky for tone mapping
     const size_t num_pixels = static_cast<size_t>(out_width) * static_cast<size_t>(out_height);
-    std::vector<Vector3d> hdr_disk(num_pixels, Vector3d::Zero());
-    std::vector<Vector3d> hdr_sky(num_pixels, Vector3d::Zero());
+    std::vector<dvec3> hdr_disk(num_pixels);
+    std::vector<dvec3> hdr_sky(num_pixels);
     std::vector<BH_COLOR_CHANNEL_TYPE> pixels(num_pixels * 3);
 
     const int total_pixels = out_width * out_height;
     std::atomic<int> pixels_done(0);
 
-    blackhole_s bh(cfg.bh_mass, cfg.bh_spin);
-    printf("Black hole: M=%.1f, a=%.2f, r+=%.4f, r_isco=%.4f\n",
-           bh.mass, bh.spin, bh.event_horizon_radius(), bh.isco_radius());
-
-    const double r_plus = bh.event_horizon_radius();
-
-    // --- Accretion disk --------------------------------------------------
-    accretion_disk_s disk(&bh, cfg.disk_outer_r, cfg.disk_thickness,
-                          cfg.disk_density, cfg.disk_opacity);
-    disk.emission_boost = cfg.disk_emission_boost;
-    disk.color_variation = cfg.disk_color_variation;
-    disk.turbulence = cfg.disk_turbulence;
-    disk.time = cfg.time;
+    const double r_plus = pp.r_plus;
 
     // --- Tone mapping ----------------------------------------------------
     const double disk_tonemap_compression = cfg.tonemap_compression;
     const double tonemap_c = pow(10.0, disk_tonemap_compression * 2.0) - 1.0;
     const double tonemap_norm = 1.0 / log(1.0 + tonemap_c);
-    auto tonemap_disk = [&](const Vector3d &hdr) -> Vector3d
+    auto tonemap_disk = [&](const dvec3 &hdr) -> dvec3
     {
         if (tonemap_c < 1e-6)
             return hdr; // compression ≈ 0 → identity
-        return Vector3d(
-            log(1.0 + tonemap_c * std::max(hdr.x(), 0.0)) * tonemap_norm,
-            log(1.0 + tonemap_c * std::max(hdr.y(), 0.0)) * tonemap_norm,
-            log(1.0 + tonemap_c * std::max(hdr.z(), 0.0)) * tonemap_norm);
+        return dvec3(
+            log(1.0 + tonemap_c * fmax(hdr.x, 0.0)) * tonemap_norm,
+            log(1.0 + tonemap_c * fmax(hdr.y, 0.0)) * tonemap_norm,
+            log(1.0 + tonemap_c * fmax(hdr.z, 0.0)) * tonemap_norm);
     };
     printf("Disk tone-map: compression=%.2f  (c=%.2f)\n",
            disk_tonemap_compression, tonemap_c);
@@ -118,7 +121,7 @@ int main(int argc, char *argv[])
     // =================================================================
     {
         GPUSceneParams gpu_params;
-        fill_gpu_params(gpu_params, cfg, bh, disk, cam_rot_matrix);
+        fill_gpu_params(gpu_params, cfg, pp, cam_rot_matrix);
 
         // Launch GPU render
         std::vector<GPUPixelResult> gpu_results(num_pixels);
@@ -133,19 +136,19 @@ int main(int argc, char *argv[])
 #pragma omp parallel for schedule(dynamic, 64)
         for (int i = 0; i < (int)num_pixels; i++)
         {
-            hdr_disk[i] = Vector3d(gpu_results[i].disk_r,
-                                   gpu_results[i].disk_g,
-                                   gpu_results[i].disk_b);
+            hdr_disk[i] = dvec3(gpu_results[i].disk_r,
+                                gpu_results[i].disk_g,
+                                gpu_results[i].disk_b);
 
             if (gpu_results[i].sky_weight > 1e-6f)
             {
-                Vector3d exit_dir(gpu_results[i].exit_vx,
-                                  gpu_results[i].exit_vy,
-                                  gpu_results[i].exit_vz);
+                dvec3 exit_dir(gpu_results[i].exit_vx,
+                               gpu_results[i].exit_vy,
+                               gpu_results[i].exit_vz);
                 if (exit_dir.squaredNorm() > 1e-24)
                 {
-                    Vector3d sky_color = sample_sky(*image, exit_dir, sky_rot,
-                                                    cfg.sky_offset_u, cfg.sky_offset_v);
+                    dvec3 sky_color = sample_sky(*image, exit_dir, sky_rot,
+                                                 cfg.sky_offset_u, cfg.sky_offset_v);
                     hdr_sky[i] = sky_color * cfg.sky_brightness *
                                  (double)gpu_results[i].sky_weight;
                 }
@@ -162,8 +165,8 @@ int main(int argc, char *argv[])
         for (int x = 0; x < out_width; ++x)
         {
             const int idx = y * out_width + x;
-            Vector3d pixel_color = Vector3d::Zero();
-            Vector3d pixel_sky = Vector3d::Zero();
+            dvec3 pixel_color;
+            dvec3 pixel_sky;
 
             for (int sy = 0; sy < aa_grid; ++sy)
             {
@@ -175,59 +178,55 @@ int main(int argc, char *argv[])
 
                     bool hit_black_hole = false;
 
-                    ray_s ray(&bh,
-                              camera_pos,
-                              cam_rot_matrix,
-                              sub_x,
-                              sub_y,
-                              fov_x,
-                              fov_y);
+                    dvec3 pos, vel;
+                    init_ray(pos, vel, camera_pos, cam_right, cam_up, cam_fwd,
+                             sub_x, sub_y, fov_x, fov_y);
 
-                    ray.cached_ks_r = bh.ks_radius(ray.pos);
+                    double cached_ks_r = ks_radius(pos, pp.bh_spin);
+                    dvec3 acc_color;
+                    double acc_opacity = 0.0;
+
                     double affine = 0.0;
                     while (affine < max_affine)
                     {
-                        // Use cached Kerr-Schild radius for step sizing (updated by advance())
-                        const double r_ks = ray.cached_ks_r;
+                        const double r_ks = cached_ks_r;
                         const double delta = std::max(r_ks - r_plus, 0.01);
                         double step_dt = base_dt * std::clamp(delta * delta, 0.0001, 1.0);
 
-                        // Reduce step size when near the disk to avoid skipping through it
-                        if (r_ks >= disk.inner_r * 0.8 && r_ks <= disk.outer_r * 1.2)
+                        // Reduce step size when near the disk
+                        if (r_ks >= pp.disk_inner_r * 0.8 && r_ks <= pp.disk_outer_r * 1.2)
                         {
-                            const double h = disk.half_thickness(r_ks);
-                            const double y_dist = fabs(ray.pos.y());
+                            const double h = disk_half_thickness(r_ks, pp);
+                            const double y_dist = fabs(pos.y);
                             if (y_dist < 5.0 * h)
                             {
-                                // Near disk plane: limit step to fraction of disk thickness
                                 step_dt = std::min(step_dt, std::max(0.3 * h, 0.005));
                             }
                         }
 
-                        if (!ray.advance(step_dt))
+                        if (!advance_ray(pos, vel, cached_ks_r, step_dt, pp))
                         {
                             hit_black_hole = true;
                             break;
                         }
 
                         // Sample disk emission along the ray
-                        const double prev_opacity = ray.accumulated_opacity;
-                        ray.sample_disk(disk, step_dt);
-                        if (ray.accumulated_opacity > prev_opacity)
+                        const double prev_opacity = acc_opacity;
+                        sample_disk_volume(pos, vel, step_dt, acc_color, acc_opacity, pp);
+                        if (acc_opacity > prev_opacity)
                             disk_samples.fetch_add(1, std::memory_order_relaxed);
 
                         affine += step_dt;
-                        if (ray.cached_ks_r <= r_plus || !std::isfinite(ray.vel.squaredNorm()))
+                        if (cached_ks_r <= r_plus || !bh_isfinite(vel.squaredNorm()))
                         {
                             hit_black_hole = true;
                             break;
                         }
-                        if (ray.distance_from_origin_squared() > escape_r2)
+                        if (pos.squaredNorm() > escape_r2)
                         {
                             break;
                         }
-                        // Early exit if disk emission is already fully opaque
-                        if (ray.accumulated_opacity > 0.99)
+                        if (acc_opacity > 0.99)
                         {
                             break;
                         }
@@ -235,17 +234,15 @@ int main(int argc, char *argv[])
 
                     if (hit_black_hole)
                     {
-                        // Behind horizon: just the accumulated disk emission (sky is black)
-                        pixel_color += ray.accumulated_color;
+                        pixel_color += acc_color;
                     }
                     else
                     {
-                        // Store disk and sky separately so tone mapping only affects disk
-                        Vector3d sky_color = ray.project_to_sky(*image, sky_rot,
-                                                                cfg.sky_offset_u, cfg.sky_offset_v) *
-                                             cfg.sky_brightness;
-                        double transmittance = 1.0 - ray.accumulated_opacity;
-                        pixel_color += ray.accumulated_color;
+                        dvec3 sky_color = sample_sky(*image, vel, sky_rot,
+                                                     cfg.sky_offset_u, cfg.sky_offset_v) *
+                                          cfg.sky_brightness;
+                        double transmittance = 1.0 - acc_opacity;
+                        pixel_color += acc_color;
                         pixel_sky += transmittance * sky_color;
                     }
 
@@ -296,21 +293,13 @@ int main(int argc, char *argv[])
         const int kernel_r = std::max((int)(cfg.bloom_radius * diag), 1);
         const double sigma = kernel_r / 3.0;
 
-        // --- Compute 3 box-blur radii that approximate a Gaussian ---------
-        // Three successive box blurs converge to a Gaussian (CLT).
-        // Each box of width w has variance (w²-1)/12.
-        // We want 3 * (w²-1)/12 = σ²  →  w = sqrt(12σ²/3 + 1).
-        // We use up to 3 passes with possibly different widths for a
-        // tighter approximation (Burt & Adelson / W3C filter spec).
         const int BOX_PASSES = 3;
         int box_radii[BOX_PASSES];
         {
             double w_ideal = sqrt(12.0 * sigma * sigma / BOX_PASSES + 1.0);
-            int w_lo = ((int)w_ideal) | 1; // round down to odd
+            int w_lo = ((int)w_ideal) | 1;
             if (w_lo < 1) w_lo = 1;
-            int w_hi = w_lo + 2;            // next odd
-            // How many passes should use w_hi vs w_lo:
-            // n_hi * (w_hi²-1)/12 + (3-n_hi) * (w_lo²-1)/12 = σ²
+            int w_hi = w_lo + 2;
             double target_var = sigma * sigma;
             double var_lo = (w_lo * w_lo - 1) / 12.0;
             double var_hi = (w_hi * w_hi - 1) / 12.0;
@@ -324,8 +313,6 @@ int main(int argc, char *argv[])
         printf("Bloom: σ=%.1f, box radii = [%d, %d, %d]\n",
                sigma, box_radii[0], box_radii[1], box_radii[2]);
 
-        // Step 1: Threshold — extract bright regions (same as before)
-        // Use flat float arrays for cache-friendly access in blur passes
         std::vector<float> buf_r(num_pixels, 0.0f);
         std::vector<float> buf_g(num_pixels, 0.0f);
         std::vector<float> buf_b(num_pixels, 0.0f);
@@ -333,19 +320,17 @@ int main(int argc, char *argv[])
 #pragma omp parallel for
         for (int i = 0; i < (int)num_pixels; ++i)
         {
-            Vector3d tm = tonemap_disk(hdr_disk[i]);
-            double lum = 0.2126 * tm.x() + 0.7152 * tm.y() + 0.0722 * tm.z();
+            dvec3 tm = tonemap_disk(hdr_disk[i]);
+            double lum = 0.2126 * tm.x + 0.7152 * tm.y + 0.0722 * tm.z;
             if (lum > thr)
             {
                 double scale = (lum - thr) / std::max(lum, 1e-12);
-                buf_r[i] = (float)(hdr_disk[i].x() * scale);
-                buf_g[i] = (float)(hdr_disk[i].y() * scale);
-                buf_b[i] = (float)(hdr_disk[i].z() * scale);
+                buf_r[i] = (float)(hdr_disk[i].x * scale);
+                buf_g[i] = (float)(hdr_disk[i].y * scale);
+                buf_b[i] = (float)(hdr_disk[i].z * scale);
             }
         }
 
-        // --- O(1)-per-pixel box blur via sliding window -------------------
-        // Horizontal and vertical passes, repeated BOX_PASSES times.
         std::vector<float> tmp_r(num_pixels), tmp_g(num_pixels), tmp_b(num_pixels);
 
         for (int pass = 0; pass < BOX_PASSES; ++pass)
@@ -358,8 +343,6 @@ int main(int argc, char *argv[])
             for (int y = 0; y < out_height; ++y)
             {
                 const int row = y * out_width;
-                // Initialize running sum for first output pixel (x=0)
-                // Window: [-br, br] clamped to [0, out_width-1]
                 float sr = 0.0f, sg = 0.0f, sb = 0.0f;
                 for (int k = -br; k <= br; ++k)
                 {
@@ -374,12 +357,10 @@ int main(int argc, char *argv[])
 
                 for (int x = 1; x < out_width; ++x)
                 {
-                    // Add pixel entering the window on the right
                     int add = std::min(x + br, out_width - 1);
                     sr += buf_r[row + add];
                     sg += buf_g[row + add];
                     sb += buf_b[row + add];
-                    // Remove pixel leaving the window on the left
                     int rem = std::clamp(x - br - 1, 0, out_width - 1);
                     sr -= buf_r[row + rem];
                     sg -= buf_g[row + rem];
@@ -425,14 +406,14 @@ int main(int argc, char *argv[])
             }
         }
 
-        // Step 4: Composite bloom onto disk HDR buffer
+        // Composite bloom onto disk HDR buffer
         const double strength = cfg.bloom_strength;
 #pragma omp parallel for
         for (int i = 0; i < (int)num_pixels; ++i)
         {
-            hdr_disk[i].x() += strength * buf_r[i];
-            hdr_disk[i].y() += strength * buf_g[i];
-            hdr_disk[i].z() += strength * buf_b[i];
+            hdr_disk[i].x += strength * buf_r[i];
+            hdr_disk[i].y += strength * buf_g[i];
+            hdr_disk[i].z += strength * buf_b[i];
         }
 
         printf("Bloom applied (kernel radius = %d px)\n", kernel_r);
@@ -447,10 +428,10 @@ int main(int argc, char *argv[])
 #pragma omp parallel for
         for (int i = 0; i < (int)num_pixels; ++i)
         {
-            Vector3d combined = hdr_disk[i] + hdr_sky[i];
-            hdr_float[i * 3 + 0] = static_cast<float>(combined.x());
-            hdr_float[i * 3 + 1] = static_cast<float>(combined.y());
-            hdr_float[i * 3 + 2] = static_cast<float>(combined.z());
+            dvec3 combined = hdr_disk[i] + hdr_sky[i];
+            hdr_float[i * 3 + 0] = static_cast<float>(combined.x);
+            hdr_float[i * 3 + 1] = static_cast<float>(combined.y);
+            hdr_float[i * 3 + 2] = static_cast<float>(combined.z);
         }
         if (stbi_write_hdr(cfg.hdr_output.c_str(), out_width, out_height, 3, hdr_float.data()))
             printf("Wrote HDR: %s\n", cfg.hdr_output.c_str());
@@ -465,11 +446,11 @@ int main(int argc, char *argv[])
 #pragma omp parallel for
     for (int i = 0; i < (int)num_pixels; ++i)
     {
-        Vector3d color = tonemap_disk(hdr_disk[i]) + hdr_sky[i];
+        dvec3 color = tonemap_disk(hdr_disk[i]) + hdr_sky[i];
         color = color.cwiseMax(0.0).cwiseMin(1.0);
-        pixels[i * 3 + 0] = static_cast<BH_COLOR_CHANNEL_TYPE>(color.x() * 255);
-        pixels[i * 3 + 1] = static_cast<BH_COLOR_CHANNEL_TYPE>(color.y() * 255);
-        pixels[i * 3 + 2] = static_cast<BH_COLOR_CHANNEL_TYPE>(color.z() * 255);
+        pixels[i * 3 + 0] = static_cast<BH_COLOR_CHANNEL_TYPE>(color.x * 255);
+        pixels[i * 3 + 1] = static_cast<BH_COLOR_CHANNEL_TYPE>(color.y * 255);
+        pixels[i * 3 + 2] = static_cast<BH_COLOR_CHANNEL_TYPE>(color.z * 255);
     }
 
     stbi_write_tga(cfg.output_file.c_str(), out_width, out_height, 3, pixels.data());
