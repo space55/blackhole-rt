@@ -456,5 +456,21 @@ int main(int argc, char *argv[])
     stbi_write_tga(cfg.output_file.c_str(), out_width, out_height, 3, pixels.data());
     printf("Wrote %s\n", cfg.output_file.c_str());
 
+    // Write JPEG thumbnail
+    {
+        std::string jpg_path = cfg.output_file;
+        // Replace extension with .jpg (or append if no dot found)
+        size_t dot_pos = jpg_path.rfind('.');
+        if (dot_pos != std::string::npos)
+            jpg_path = jpg_path.substr(0, dot_pos) + ".jpg";
+        else
+            jpg_path += ".jpg";
+
+        if (stbi_write_jpg(jpg_path.c_str(), out_width, out_height, 3, pixels.data(), 90))
+            printf("Wrote JPEG thumbnail: %s\n", jpg_path.c_str());
+        else
+            printf("ERROR: failed to write JPEG thumbnail: %s\n", jpg_path.c_str());
+    }
+
     return 0;
 }
