@@ -149,8 +149,8 @@ fi
 # Check GPU availability if requesting a GPU
 if $USE_GPU; then
     if [[ "$AVAIL_GRES" == "(null)" || -z "$AVAIL_GRES" ]]; then
-        echo "Warning: --gres=gpu:1 requested but partition '$PARTITION' has no GPUs configured." >&2
-        echo "  Disabling GPU request. Use -P to pick a GPU partition, or configure Gres in slurm.conf." >&2
+        echo "Note: No Slurm GRES configured on partition '$PARTITION'." >&2
+        echo "  Skipping --gres=gpu:1 flag (OK for WSL2 nodes — CUDA will use the GPU automatically)." >&2
         USE_GPU=false
     fi
 fi
