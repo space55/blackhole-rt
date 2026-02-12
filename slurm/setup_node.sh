@@ -180,6 +180,16 @@ if [[ -f "$SLURM_CONF" ]] && ! grep -q "^NodeName=$NODE_NAME " "$SLURM_CONF"; th
     # Reserve ~5% for OS overhead, Slurm wants RealMemory in MB
     NODE_REAL_MEM=$(( NODE_MEM_MB * 95 / 100 ))
 
+    # Detect CPU topology — Slurm is strict about Sockets×Cores×Threads matching
+    NODE_SOCKETS=$(lscpu | awk -F: '/^Socket\(s\)/{gsub(/ /,"",$2); print $2}')
+    NODE_CORES=$(lscpu | awk -F: '/^Core\(s\) per socket/{gsub(/ /,"",$2); print $2}')
+    NODE_THREADS=$(lscpu | awk -F: '/^Thread\(s\) per core/{gsub(/ /,"",$2); print $2}')
+    # Fallback if lscpu parsing fails
+    NODE_SOCKETS=${NODE_SOCKETS:-1}
+    NODE_CORES=${NODE_CORES:-$NODE_CPUS}
+    NODE_THREADS=${NODE_THREADS:-1}
+    log "CPU topology: Sockets=$NODE_SOCKETS CoresPerSocket=$NODE_CORES ThreadsPerCore=$NODE_THREADS (total=$NODE_CPUS)"
+
     NODE_GRES=""
     if command -v nvidia-smi &>/dev/null; then
         GPU_COUNT=$(nvidia-smi --query-gpu=name --format=csv,noheader 2>/dev/null | wc -l | tr -d ' ')
@@ -193,7 +203,7 @@ if [[ -f "$SLURM_CONF" ]] && ! grep -q "^NodeName=$NODE_NAME " "$SLURM_CONF"; th
         fi
     fi
 
-    NODE_LINE="NodeName=$NODE_NAME NodeAddr=$TS_IP CPUs=$NODE_CPUS RealMemory=$NODE_REAL_MEM $NODE_GRES State=UNKNOWN"
+    NODE_LINE="NodeName=$NODE_NAME NodeAddr=$TS_IP CPUs=$NODE_CPUS Sockets=$NODE_SOCKETS CoresPerSocket=$NODE_CORES ThreadsPerCore=$NODE_THREADS RealMemory=$NODE_REAL_MEM $NODE_GRES State=UNKNOWN"
     echo "" >> "$SLURM_CONF"
     echo "# Auto-added by setup_node.sh on $(date -Iseconds)" >> "$SLURM_CONF"
     echo "$NODE_LINE" >> "$SLURM_CONF"
