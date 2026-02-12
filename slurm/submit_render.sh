@@ -110,7 +110,52 @@ fi
 
 echo
 echo "Cluster status:"
-sinfo --format="  %P  %a  %D/%F  %C" --noheader
+sinfo -o '  %12P %6a %10F %8c %10m %10G' --noheader
+echo
+
+# ---------- Validate resources against cluster capacity ----------------------
+# Query the target partition for what's actually available to avoid
+# "Requested node configuration is not available" errors.
+PART_INFO=$(sinfo -p "$PARTITION" -o '%c %m %G' --noheader 2>/dev/null | head -1 | tr -s ' ')
+if [[ -z "$PART_INFO" ]]; then
+    echo "Error: Partition '$PARTITION' not found. Available partitions:" >&2
+    sinfo -o '  %P' --noheader >&2
+    exit 1
+fi
+
+MAX_CPUS=$(echo "$PART_INFO" | awk '{print $1}')
+MAX_MEM_MB=$(echo "$PART_INFO" | awk '{print $2}')
+AVAIL_GRES=$(echo "$PART_INFO" | awk '{print $3}')
+
+# Auto-fix CPUs if requesting more than the node has
+if [[ "$CPUS" -gt "$MAX_CPUS" ]]; then
+    echo "Warning: Requested $CPUS CPUs but partition '$PARTITION' has max $MAX_CPUS. Clamping." >&2
+    CPUS=$MAX_CPUS
+fi
+
+# Auto-fix memory: convert requested memory to MB for comparison
+REQ_MEM_MB=$(echo "$MEMORY" | awk '{
+    val=$1; gsub(/[^0-9.]/,"",val);
+    if ($1 ~ /[Gg]/) val=val*1024;
+    if ($1 ~ /[Tt]/) val=val*1024*1024;
+    printf "%d", val
+}')
+if [[ "$REQ_MEM_MB" -gt "$MAX_MEM_MB" ]]; then
+    NEW_MEM="$((MAX_MEM_MB / 1024))G"
+    echo "Warning: Requested $MEMORY but partition '$PARTITION' has max ${MAX_MEM_MB}MB. Clamping to $NEW_MEM." >&2
+    MEMORY=$NEW_MEM
+fi
+
+# Check GPU availability if requesting a GPU
+if $USE_GPU; then
+    if [[ "$AVAIL_GRES" == "(null)" || -z "$AVAIL_GRES" ]]; then
+        echo "Warning: --gres=gpu:1 requested but partition '$PARTITION' has no GPUs configured." >&2
+        echo "  Disabling GPU request. Use -P to pick a GPU partition, or configure Gres in slurm.conf." >&2
+        USE_GPU=false
+    fi
+fi
+
+echo "Resolved resources: CPUs=$CPUS, Mem=$MEMORY, GPU=$USE_GPU"
 echo
 
 # ---------- Build sbatch command ---------------------------------------------
