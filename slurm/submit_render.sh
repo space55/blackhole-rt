@@ -16,11 +16,11 @@
 #   -d DIR       Project directory on compute nodes  (default: /opt/bhrt)
 #   -s SCENE     Scene file name (relative to build) (default: scene.txt)
 #   -o DIR       Output subdirectory under build/    (default: frames)
-#   -P PARTITION Slurm partition to use              (default: cpu)
+#   -P PARTITION Slurm partition to use              (default: gpu-compute)
 #   -c CPUS      CPUs per frame task                 (default: 4)
 #   -m MEMORY    Memory per task (e.g. 4G)           (default: 4G)
 #   -T TIME      Max wall time per frame             (default: 01:00:00)
-#   --gpu        Submit to gpu partition with 1 GPU  (default: off)
+#   --gpu        Submit to gpu partition with 1 GPU  (default: on)
 #   --dry-run    Show the sbatch command without submitting
 #   -h           Show this help
 # ============================================================================
@@ -35,11 +35,11 @@ PREFIX="frame"
 PROJECT_DIR="/opt/bhrt"
 SCENE_FILE="scene.txt"
 OUTPUT_DIR="frames"
-PARTITION="cpu"
+PARTITION="gpu"
 CPUS=4
 MEMORY="4G"
 WALL_TIME="01:00:00"
-USE_GPU=false
+USE_GPU=true
 DRY_RUN=false
 
 # ---------- Parse arguments --------------------------------------------------
