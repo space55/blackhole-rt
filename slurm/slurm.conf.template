@@ -37,6 +37,9 @@ DefMemPerCPU=2048            # 2 GB per CPU default
 MaxMemPerCPU=0               # unlimited
 TaskPlugin=task/affinity
 
+# ---------- Mail (disabled — no MTA needed on render nodes) -----------------
+MailProg=/bin/true
+
 # ---------- Timeouts (generous for Tailscale latency) -----------------------
 SlurmctldTimeout=120
 SlurmdTimeout=120
