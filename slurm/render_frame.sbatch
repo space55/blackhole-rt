@@ -21,7 +21,7 @@
 #SBATCH --cpus-per-task=4
 #SBATCH --mem=4G
 #SBATCH --time=01:00:00
-#SBATCH --partition=gpu-compute
+#SBATCH --partition=gpu
 
 # ---------- Configuration (from environment or defaults) ---------------------
 PROJECT_DIR="${BHRT_PROJECT_DIR:-/opt/bhrt}"
