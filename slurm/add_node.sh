@@ -1,0 +1,263 @@
+#!/usr/bin/env bash
+# ============================================================================
+# add_node.sh — Register a remote compute node from the head node
+# ============================================================================
+# Run this on the HEAD NODE to add a Tailscale-connected machine to the
+# Slurm cluster.  It will:
+#   1. SSH into the remote node to detect hardware (CPUs, memory, GPUs)
+#   2. Add a NodeName entry to the head's /etc/slurm/slurm.conf
+#   3. Add the node to a partition (existing or new)
+#   4. Push the updated slurm.conf to the remote node
+#   5. Restart slurmctld and the remote slurmd
+#
+# Usage:
+#   sudo ./add_node.sh <tailscale-host-or-ip> [--node-name NAME] [--partition PART]
+#
+# Examples:
+#   sudo ./add_node.sh gpu-server-1
+#   sudo ./add_node.sh 100.64.0.5 --node-name gpu01 --partition gpu
+#   sudo ./add_node.sh my-desktop --node-name desktop01
+# ============================================================================
+
+set -euo pipefail
+
+RED='\033[0;31m'
+GREEN='\033[0;32m'
+YELLOW='\033[1;33m'
+NC='\033[0m'
+
+log()  { echo -e "${GREEN}[add-node]${NC} $*"; }
+warn() { echo -e "${YELLOW}[warn]${NC} $*"; }
+err()  { echo -e "${RED}[error]${NC} $*" >&2; }
+
+# ---------- Parse arguments --------------------------------------------------
+REMOTE_HOST=""
+NODE_NAME=""
+PARTITION=""
+SSH_USER="root"
+
+while [[ $# -gt 0 ]]; do
+    case "$1" in
+        --node-name)  NODE_NAME="$2"; shift 2 ;;
+        --partition)  PARTITION="$2"; shift 2 ;;
+        --ssh-user)   SSH_USER="$2"; shift 2 ;;
+        -h|--help)
+            head -18 "$0" | tail -15
+            exit 0
+            ;;
+        -*)
+            err "Unknown option: $1"
+            exit 1
+            ;;
+        *)
+            REMOTE_HOST="$1"; shift
+            ;;
+    esac
+done
+
+if [[ -z "$REMOTE_HOST" ]]; then
+    err "Usage: $0 <tailscale-host-or-ip> [--node-name NAME] [--partition PART]"
+    exit 1
+fi
+
+SLURM_CONF="/etc/slurm/slurm.conf"
+if [[ ! -f "$SLURM_CONF" ]]; then
+    err "$SLURM_CONF not found. Run setup_node.sh --head first."
+    exit 1
+fi
+
+# ---------- 1. Verify connectivity ------------------------------------------
+log "Testing SSH connectivity to $REMOTE_HOST ..."
+if ! ssh -o ConnectTimeout=10 -o BatchMode=yes "$SSH_USER@$REMOTE_HOST" "echo ok" &>/dev/null; then
+    err "Cannot SSH to $SSH_USER@$REMOTE_HOST"
+    echo "  Make sure:"
+    echo "    - Tailscale is running on both machines"
+    echo "    - SSH keys are set up (ssh-copy-id $SSH_USER@$REMOTE_HOST)"
+    exit 1
+fi
+log "SSH connection OK."
+
+# ---------- 2. Detect remote hardware ---------------------------------------
+log "Detecting hardware on $REMOTE_HOST ..."
+
+REMOTE_INFO=$(ssh "$SSH_USER@$REMOTE_HOST" bash -s <<'DETECT'
+set -e
+CPUS=$(nproc)
+MEM_KB=$(grep MemTotal /proc/meminfo | awk '{print $2}')
+MEM_MB=$((MEM_KB / 1024))
+REAL_MEM=$(( MEM_MB * 95 / 100 ))
+SOCKETS=$(lscpu | awk -F: '/^Socket\(s\)/{gsub(/ /,"",$2); print $2}')
+CORES=$(lscpu | awk -F: '/^Core\(s\) per socket/{gsub(/ /,"",$2); print $2}')
+THREADS=$(lscpu | awk -F: '/^Thread\(s\) per core/{gsub(/ /,"",$2); print $2}')
+SOCKETS=${SOCKETS:-1}
+CORES=${CORES:-$CPUS}
+THREADS=${THREADS:-1}
+HOSTNAME_SHORT=$(hostname -s)
+
+GPU_COUNT=0
+if command -v nvidia-smi &>/dev/null; then
+    GPU_COUNT=$(nvidia-smi --query-gpu=name --format=csv,noheader 2>/dev/null | wc -l | tr -d ' ')
+fi
+
+TS_IP=$(tailscale ip -4 2>/dev/null || echo "")
+
+echo "CPUS=$CPUS"
+echo "REAL_MEM=$REAL_MEM"
+echo "SOCKETS=$SOCKETS"
+echo "CORES=$CORES"
+echo "THREADS=$THREADS"
+echo "GPU_COUNT=$GPU_COUNT"
+echo "TS_IP=$TS_IP"
+echo "HOSTNAME_SHORT=$HOSTNAME_SHORT"
+DETECT
+)
+
+# Source the values
+eval "$REMOTE_INFO"
+
+log "Remote hardware:"
+echo "  Hostname:     $HOSTNAME_SHORT"
+echo "  Tailscale IP: $TS_IP"
+echo "  CPUs:         $CPUS (${SOCKETS}s × ${CORES}c × ${THREADS}t)"
+echo "  Memory:       ${REAL_MEM} MB"
+echo "  GPUs:         $GPU_COUNT"
+
+# Default node name to remote hostname
+NODE_NAME="${NODE_NAME:-$HOSTNAME_SHORT}"
+
+# Use Tailscale IP; fall back to the host argument
+NODE_ADDR="${TS_IP:-$REMOTE_HOST}"
+
+# ---------- 3. Check for duplicates -----------------------------------------
+if grep -q "^NodeName=$NODE_NAME " "$SLURM_CONF"; then
+    warn "NodeName=$NODE_NAME already exists in $SLURM_CONF:"
+    grep "^NodeName=$NODE_NAME " "$SLURM_CONF" | sed 's/^/  /'
+    echo
+    read -rp "  Overwrite? [y/N] " REPLY
+    if [[ "$REPLY" =~ ^[Yy]$ ]]; then
+        sed -i "/^NodeName=$NODE_NAME /d" "$SLURM_CONF"
+        # Also remove the auto-added comment line above if present
+        sed -i "/^# Auto-added.*$NODE_NAME/d" "$SLURM_CONF"
+    else
+        log "Skipped. No changes made."
+        exit 0
+    fi
+fi
+
+# ---------- 4. Build the NodeName line ---------------------------------------
+NODE_GRES=""
+if [[ "$GPU_COUNT" -gt 0 ]]; then
+    NODE_GRES="Gres=gpu:$GPU_COUNT"
+    # Ensure GresTypes=gpu is enabled
+    if grep -q "^# *GresTypes=gpu" "$SLURM_CONF"; then
+        sed -i 's/^# *GresTypes=gpu/GresTypes=gpu/' "$SLURM_CONF"
+        log "Enabled GresTypes=gpu in $SLURM_CONF"
+    fi
+fi
+
+NODE_LINE="NodeName=$NODE_NAME NodeAddr=$NODE_ADDR CPUs=$CPUS Sockets=$SOCKETS CoresPerSocket=$CORES ThreadsPerCore=$THREADS RealMemory=$REAL_MEM $NODE_GRES State=UNKNOWN"
+
+echo "" >> "$SLURM_CONF"
+echo "# Auto-added by add_node.sh on $(date -Iseconds) — $NODE_NAME" >> "$SLURM_CONF"
+echo "$NODE_LINE" >> "$SLURM_CONF"
+log "Added: $NODE_LINE"
+
+# ---------- 5. Add to partition ----------------------------------------------
+# Auto-pick partition name if not specified
+if [[ -z "$PARTITION" ]]; then
+    if [[ "$GPU_COUNT" -gt 0 ]]; then
+        PARTITION="gpu"
+    else
+        PARTITION="compute"
+    fi
+fi
+
+if grep -q "^PartitionName=$PARTITION " "$SLURM_CONF"; then
+    # Append to existing partition
+    if ! grep "^PartitionName=$PARTITION " "$SLURM_CONF" | grep -q "$NODE_NAME"; then
+        EXISTING=$(grep "^PartitionName=$PARTITION " "$SLURM_CONF")
+        UPDATED=$(echo "$EXISTING" | sed "s/Nodes=\([^ ]*\)/Nodes=\1,$NODE_NAME/")
+        sed -i "s|^PartitionName=$PARTITION .*|$UPDATED|" "$SLURM_CONF"
+        log "Appended $NODE_NAME to partition '$PARTITION'."
+    else
+        log "$NODE_NAME already in partition '$PARTITION'."
+    fi
+else
+    # Create new partition
+    DEFAULT="NO"
+    # If no default partition exists, make this one default
+    if ! grep -q "^PartitionName=.*Default=YES" "$SLURM_CONF"; then
+        DEFAULT="YES"
+    fi
+    PART_LINE="PartitionName=$PARTITION Nodes=$NODE_NAME Default=$DEFAULT MaxTime=INFINITE State=UP"
+    echo "$PART_LINE" >> "$SLURM_CONF"
+    log "Created partition: $PART_LINE"
+fi
+
+# ---------- 6. Push config to remote and all known nodes ---------------------
+log "Pushing updated slurm.conf to $REMOTE_HOST ..."
+scp "$SLURM_CONF" "$SSH_USER@$REMOTE_HOST:/etc/slurm/slurm.conf"
+
+# Also push to all other known nodes so configs stay in sync
+log "Syncing slurm.conf to other cluster nodes ..."
+KNOWN_NODES=$(grep -oP '(?<=^NodeName=)\S+' "$SLURM_CONF" | grep -v "^$NODE_NAME$" || true)
+for node in $KNOWN_NODES; do
+    ADDR=$(grep "^NodeName=$node " "$SLURM_CONF" | grep -oP '(?<=NodeAddr=)\S+' || true)
+    TARGET="${ADDR:-$node}"
+    if scp -o ConnectTimeout=5 "$SLURM_CONF" "$SSH_USER@$TARGET:/etc/slurm/slurm.conf" 2>/dev/null; then
+        echo "  ✓ $node ($TARGET)"
+    else
+        echo "  ✗ $node ($TARGET) — unreachable, update manually"
+    fi
+done
+
+# ---------- 7. Restart slurmctld on head and slurmd on remote ----------------
+log "Restarting slurmctld on head node ..."
+systemctl restart slurmctld
+
+log "Setting hostname and restarting slurmd on $REMOTE_HOST ..."
+ssh "$SSH_USER@$REMOTE_HOST" bash -s "$NODE_NAME" <<'REMOTE_RESTART'
+NODE_NAME="$1"
+
+# Set hostname to match NodeName
+hostnamectl set-hostname "$NODE_NAME" 2>/dev/null || hostname "$NODE_NAME"
+echo "$NODE_NAME" > /etc/hostname
+grep -q "$NODE_NAME" /etc/hosts || echo "127.0.1.1  $NODE_NAME" >> /etc/hosts
+
+# Create/update systemd override for slurmd
+mkdir -p /etc/systemd/system/slurmd.service.d
+cat > /etc/systemd/system/slurmd.service.d/nodename.conf <<EOF
+[Service]
+Type=simple
+PIDFile=
+ExecStart=
+ExecStart=/usr/sbin/slurmd -D -N $NODE_NAME \$SLURMD_OPTIONS
+EOF
+
+systemctl daemon-reload
+systemctl enable slurmd
+systemctl restart slurmd
+echo "slurmd restarted with NodeName=$NODE_NAME"
+REMOTE_RESTART
+
+# ---------- 8. Verify -------------------------------------------------------
+log "Waiting for node to register ..."
+sleep 3
+
+echo
+echo "============================================"
+echo " Node added successfully!"
+echo "============================================"
+echo " NodeName:     $NODE_NAME"
+echo " NodeAddr:     $NODE_ADDR"
+echo " CPUs:         $CPUS"
+echo " Memory:       ${REAL_MEM} MB"
+echo " GPUs:         $GPU_COUNT"
+echo " Partition:    $PARTITION"
+echo "============================================"
+echo
+
+sinfo -N -o '%15N %10T %6c %10m %20f %10G' 2>/dev/null || true
+echo
+log "Done! If the node shows as 'down', try:"
+echo "  sudo scontrol update NodeName=$NODE_NAME State=RESUME"
