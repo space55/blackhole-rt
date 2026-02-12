@@ -147,9 +147,23 @@ if [[ -f "$TEMPLATE_DIR/slurm.conf.template" && ! -f "$SLURM_CONF" ]]; then
     log "Installing slurm.conf template to $SLURM_CONF ..."
     mkdir -p /etc/slurm
     cp "$TEMPLATE_DIR/slurm.conf.template" "$SLURM_CONF"
+
+    # On the head node, auto-fill SlurmctldHost with this node's name
+    if $IS_HEAD; then
+        sed -i "s/^SlurmctldHost=.*/SlurmctldHost=$NODE_NAME/" "$SLURM_CONF"
+        log "Set SlurmctldHost=$NODE_NAME in $SLURM_CONF"
+    fi
     warn "Edit $SLURM_CONF and fill in your node list + Tailscale addresses!"
 elif [[ -f "$SLURM_CONF" ]]; then
-    log "Existing $SLURM_CONF found — skipping. Edit manually if needed."
+    log "Existing $SLURM_CONF found."
+    # If running as head, ensure SlurmctldHost matches this node
+    if $IS_HEAD; then
+        CURRENT_CTL=$(grep -Po '(?<=^SlurmctldHost=)\S+' "$SLURM_CONF" 2>/dev/null || true)
+        if [[ "$CURRENT_CTL" != "$NODE_NAME" ]]; then
+            log "Updating SlurmctldHost from '$CURRENT_CTL' to '$NODE_NAME' ..."
+            sed -i "s/^SlurmctldHost=.*/SlurmctldHost=$NODE_NAME/" "$SLURM_CONF"
+        fi
+    fi
 else
     warn "No slurm.conf template found. Create $SLURM_CONF manually."
 fi
