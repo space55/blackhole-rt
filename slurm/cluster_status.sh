@@ -74,27 +74,33 @@ show_status() {
 
     # ---- 2. Slurm Partitions & Nodes ----------------------------------------
     echo -e "${CYAN}━━━ Slurm Cluster ━━━${NC}"
-    if command -v sinfo &>/dev/null && sinfo &>/dev/null; then
-        echo
-        sinfo --format="  %-12P %-6a %-10F %-8c %-10m %-8G" 2>/dev/null || echo "  (cannot reach slurmctld)"
-        echo
-        echo "  Node details:"
-        sinfo --Node --format="    %-15N %-10T %-6c %-10m %-20f" --noheader 2>/dev/null || true
+    if command -v sinfo &>/dev/null; then
+        SINFO_OUT=$(sinfo -o '  %12P %6a %10F %8c %10m %8G' 2>&1) || true
+        if [[ -n "$SINFO_OUT" && ! "$SINFO_OUT" =~ "error" ]]; then
+            echo
+            echo "$SINFO_OUT"
+            echo
+            echo "  Node details:"
+            sinfo -N -o '    %15N %10T %6c %10m %20f' --noheader 2>/dev/null || true
+        else
+            echo -e "  ${RED}Cannot reach slurmctld${NC}"
+            [[ -n "$SINFO_OUT" ]] && echo "  $SINFO_OUT" | head -3
+        fi
     else
-        echo -e "  ${RED}Slurm not available or slurmctld not running${NC}"
+        echo -e "  ${RED}Slurm not available (sinfo not found)${NC}"
     fi
     echo
 
     # ---- 3. Job Queue -------------------------------------------------------
     echo -e "${CYAN}━━━ Render Jobs ━━━${NC}"
-    if command -v squeue &>/dev/null && squeue &>/dev/null; then
+    if command -v squeue &>/dev/null; then
         BHRT_JOBS=$(squeue --name=bhrt-render --noheader 2>/dev/null | wc -l | tr -d ' ')
         if [[ "$BHRT_JOBS" -gt 0 ]]; then
             RUNNING=$(squeue --name=bhrt-render --states=RUNNING --noheader 2>/dev/null | wc -l | tr -d ' ')
             PENDING=$(squeue --name=bhrt-render --states=PENDING --noheader 2>/dev/null | wc -l | tr -d ' ')
             echo -e "  Active render jobs: ${GREEN}$RUNNING running${NC}, ${YELLOW}$PENDING pending${NC}"
             echo
-            squeue --name=bhrt-render --format="  %-10i %-8j %-8T %-10M %-6D %-20R" 2>/dev/null | head -20
+            squeue --name=bhrt-render -o '  %10i %8j %8T %10M %6D %20R' 2>/dev/null | head -20
             if [[ "$BHRT_JOBS" -gt 20 ]]; then
                 echo "  ... and $((BHRT_JOBS - 20)) more"
             fi

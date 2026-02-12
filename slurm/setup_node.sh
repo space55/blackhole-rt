@@ -168,6 +168,52 @@ else
     warn "No slurm.conf template found. Create $SLURM_CONF manually."
 fi
 
+# ---------- 5a. Fix ProctrackType if plugin doesn't exist --------------------
+# proctrack/linuxprocs was removed in newer Slurm. Auto-detect a working plugin.
+if [[ -f "$SLURM_CONF" ]]; then
+    CURRENT_PROCTRACK=$(grep -Po '(?<=^ProctrackType=)\S+' "$SLURM_CONF" 2>/dev/null || true)
+    if [[ -n "$CURRENT_PROCTRACK" ]]; then
+        # Find the Slurm plugin directory
+        SLURM_PLUGIN_DIR=""
+        for d in /usr/lib64/slurm /usr/lib/x86_64-linux-gnu/slurm /usr/lib/slurm /usr/lib/*/slurm; do
+            if [[ -d "$d" ]]; then
+                SLURM_PLUGIN_DIR="$d"
+                break
+            fi
+        done
+
+        PLUGIN_FILE=$(echo "$CURRENT_PROCTRACK" | tr '/' '_')
+        PLUGIN_EXISTS=false
+        if [[ -n "$SLURM_PLUGIN_DIR" && -f "$SLURM_PLUGIN_DIR/${PLUGIN_FILE}.so" ]]; then
+            PLUGIN_EXISTS=true
+        fi
+
+        if ! $PLUGIN_EXISTS; then
+            # Pick the best available alternative
+            NEW_PROCTRACK=""
+            for candidate in proctrack/cgroup proctrack/pgid; do
+                CAND_FILE=$(echo "$candidate" | tr '/' '_')
+                if [[ -n "$SLURM_PLUGIN_DIR" && -f "$SLURM_PLUGIN_DIR/${CAND_FILE}.so" ]]; then
+                    NEW_PROCTRACK="$candidate"
+                    break
+                fi
+            done
+            # If we couldn't find the plugin dir, default to pgid (universally available)
+            [[ -z "$NEW_PROCTRACK" ]] && NEW_PROCTRACK="proctrack/pgid"
+
+            log "ProctrackType=$CURRENT_PROCTRACK plugin not found, switching to $NEW_PROCTRACK"
+            sed -i "s|^ProctrackType=.*|ProctrackType=$NEW_PROCTRACK|" "$SLURM_CONF"
+
+            # Also fix TaskPlugin if it references task/cgroup but cgroup isn't available
+            if [[ "$NEW_PROCTRACK" == "proctrack/pgid" ]]; then
+                sed -i 's|TaskPlugin=task/affinity,task/cgroup|TaskPlugin=task/affinity|' "$SLURM_CONF" 2>/dev/null || true
+            fi
+        else
+            log "ProctrackType=$CURRENT_PROCTRACK plugin found — OK."
+        fi
+    fi
+fi
+
 # ---------- 5b. Auto-register this node in slurm.conf -----------------------
 # If there's no NodeName entry for this machine, add one automatically using
 # detected hardware specs and the Tailscale IP.
