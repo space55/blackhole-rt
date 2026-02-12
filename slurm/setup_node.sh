@@ -280,9 +280,15 @@ log "Starting Slurm compute daemon (slurmd)..."
 # Create a systemd override to pass the explicit node name to slurmd.
 # This avoids the "Unable to determine this slurmd's NodeName" fatal error
 # when the OS hostname doesn't exactly match a NodeName in slurm.conf.
+#
+# We also set Type=simple because -D keeps slurmd in the foreground.
+# The stock unit often uses Type=forking, which causes a startup timeout
+# when combined with -D (systemd waits for a fork that never happens).
 mkdir -p /etc/systemd/system/slurmd.service.d
 cat > /etc/systemd/system/slurmd.service.d/nodename.conf <<EOF
 [Service]
+Type=simple
+PIDFile=
 ExecStart=
 ExecStart=/usr/sbin/slurmd -D -N $NODE_NAME \$SLURMD_OPTIONS
 EOF
