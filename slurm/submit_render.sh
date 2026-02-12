@@ -16,7 +16,7 @@
 #   -d DIR       Project directory on compute nodes  (default: /opt/bhrt)
 #   -s SCENE     Scene file name (relative to build) (default: scene.txt)
 #   -o DIR       Output subdirectory under build/    (default: frames)
-#   -P PARTITION Slurm partition to use              (default: gpu-compute)
+#   -P PARTITION Slurm partition to use              (default: gpu)
 #   -c CPUS      CPUs per frame task                 (default: 4)
 #   -m MEMORY    Memory per task (e.g. 4G)           (default: 4G)
 #   -T TIME      Max wall time per frame             (default: 01:00:00)
