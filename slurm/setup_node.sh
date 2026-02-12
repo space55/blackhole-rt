@@ -11,12 +11,21 @@
 #   - SSH access between nodes via Tailscale IPs
 #
 # Usage:
-#   sudo ./setup_node.sh [--head] [--node-name NAME]
+#   sudo ./setup_node.sh [--head] [--node-name NAME] [--head-addr HOST]
 #
-#   --head          Run as the Slurm controller node
+#   --head            Run as the Slurm controller node
 #   --node-name NAME  Set this node's Slurm NodeName (must match slurm.conf).
 #                     Also sets the OS hostname so slurmd can self-identify.
 #                     If omitted, the current hostname is used.
+#   --head-addr HOST  Tailscale hostname/IP of the head node.  Compute nodes
+#                     use this to pull slurm.conf + munge.key so configs stay
+#                     in sync.  Recommended for all non-head nodes.
+#
+# Preferred workflow:
+#   Head node:    sudo ./setup_node.sh --head --node-name myhead
+#   Add nodes:    sudo ./add_node.sh <tailscale-host>  (from head node)
+#     — OR —
+#   Compute node: sudo ./setup_node.sh --node-name gpu01 --head-addr myhead
 # ============================================================================
 
 set -euo pipefail
@@ -28,11 +37,13 @@ NC='\033[0m'
 
 IS_HEAD=false
 NODE_NAME=""
+HEAD_ADDR=""
 
 while [[ $# -gt 0 ]]; do
     case "$1" in
         --head)      IS_HEAD=true; shift ;;
         --node-name) NODE_NAME="$2"; shift 2 ;;
+        --head-addr) HEAD_ADDR="$2"; shift 2 ;;
         *) echo "Unknown option: $1" >&2; exit 1 ;;
     esac
 done
@@ -142,10 +153,33 @@ chown slurm:slurm /var/spool/slurmctld /var/log/slurm 2>/dev/null || true
 # ---------- 5. Slurm config -------------------------------------------------
 SLURM_CONF="/etc/slurm/slurm.conf"
 TEMPLATE_DIR="$(cd "$(dirname "$0")" && pwd)"
+mkdir -p /etc/slurm
+
+# If --head-addr was given, pull slurm.conf (and munge key) from the head node.
+# This ensures all nodes share the SAME config — avoiding "node not found" errors.
+if [[ -n "$HEAD_ADDR" ]] && ! $IS_HEAD; then
+    log "Pulling slurm.conf from head node ($HEAD_ADDR) ..."
+    if scp -o ConnectTimeout=10 "root@$HEAD_ADDR:/etc/slurm/slurm.conf" "$SLURM_CONF" 2>/dev/null; then
+        log "slurm.conf synced from $HEAD_ADDR."
+    else
+        warn "Could not pull slurm.conf from $HEAD_ADDR — will use local copy."
+    fi
+
+    MUNGE_KEY="/etc/munge/munge.key"
+    if [[ ! -f "$MUNGE_KEY" ]]; then
+        log "Pulling munge.key from head node ($HEAD_ADDR) ..."
+        if scp -o ConnectTimeout=10 "root@$HEAD_ADDR:/etc/munge/munge.key" "$MUNGE_KEY" 2>/dev/null; then
+            chown munge:munge "$MUNGE_KEY"
+            chmod 400 "$MUNGE_KEY"
+            log "munge.key synced from $HEAD_ADDR."
+        else
+            warn "Could not pull munge.key — copy it manually."
+        fi
+    fi
+fi
 
 if [[ -f "$TEMPLATE_DIR/slurm.conf.template" && ! -f "$SLURM_CONF" ]]; then
     log "Installing slurm.conf template to $SLURM_CONF ..."
-    mkdir -p /etc/slurm
     cp "$TEMPLATE_DIR/slurm.conf.template" "$SLURM_CONF"
 
     # On the head node, auto-fill SlurmctldHost with this node's name
