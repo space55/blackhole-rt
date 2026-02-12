@@ -60,9 +60,21 @@ Waittime=0
 # ============================================================================
 
 # --- Example CPU-only nodes -------------------------------------------------
-# NodeName=node01 NodeAddr=100.x.y.1  CPUs=8  RealMemory=16000  State=UNKNOWN
-# NodeName=node02 NodeAddr=100.x.y.2  CPUs=16 RealMemory=32000  State=UNKNOWN
-# NodeName=node03 NodeAddr=100.x.y.3  CPUs=8  RealMemory=16000  State=UNKNOWN
+# IMPORTANT: NodeName must match the OS hostname OR be passed to slurmd via
+#            the -N flag (setup_node.sh --node-name does this automatically).
+#            NodeHostname is optional; set it if the OS hostname differs from
+#            NodeName and you cannot change it.
+#            NodeAddr MUST be the Tailscale IP or hostname.
+#
+# NodeName=node01  NodeAddr=100.x.y.1  CPUs=8   RealMemory=16000  State=UNKNOWN
+# NodeName=node02  NodeAddr=100.x.y.2  CPUs=16  RealMemory=32000  State=UNKNOWN
+# NodeName=node03  NodeAddr=100.x.y.3  CPUs=8   RealMemory=16000  State=UNKNOWN
+#
+# If the OS hostname differs from NodeName (e.g. hostname is "aws-bhrt3" but
+# you want Slurm to call it "node01"), use EITHER:
+#   a) setup_node.sh --node-name node01   (recommended — sets hostname + slurmd -N)
+#   b) NodeHostname=aws-bhrt3  in the line below:
+# NodeName=node01  NodeHostname=aws-bhrt3  NodeAddr=100.x.y.1  CPUs=8  RealMemory=16000  State=UNKNOWN
 
 # --- Example GPU nodes (uncomment GresTypes=gpu above) ----------------------
 # NodeName=gpu01  NodeAddr=100.x.y.10 CPUs=16 RealMemory=64000  Gres=gpu:1  State=UNKNOWN

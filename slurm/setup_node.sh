@@ -11,7 +11,12 @@
 #   - SSH access between nodes via Tailscale IPs
 #
 # Usage:
-#   sudo ./setup_node.sh [--head]    # pass --head on the controller node
+#   sudo ./setup_node.sh [--head] [--node-name NAME]
+#
+#   --head          Run as the Slurm controller node
+#   --node-name NAME  Set this node's Slurm NodeName (must match slurm.conf).
+#                     Also sets the OS hostname so slurmd can self-identify.
+#                     If omitted, the current hostname is used.
 # ============================================================================
 
 set -euo pipefail
@@ -22,7 +27,15 @@ YELLOW='\033[1;33m'
 NC='\033[0m'
 
 IS_HEAD=false
-[[ "${1:-}" == "--head" ]] && IS_HEAD=true
+NODE_NAME=""
+
+while [[ $# -gt 0 ]]; do
+    case "$1" in
+        --head)      IS_HEAD=true; shift ;;
+        --node-name) NODE_NAME="$2"; shift 2 ;;
+        *) echo "Unknown option: $1" >&2; exit 1 ;;
+    esac
+done
 
 log()  { echo -e "${GREEN}[setup]${NC} $*"; }
 warn() { echo -e "${YELLOW}[warn]${NC} $*"; }
@@ -77,6 +90,26 @@ fi
 log "Tailscale IP: $TS_IP"
 TS_HOSTNAME=$(tailscale status --self --json | python3 -c "import sys,json; print(json.load(sys.stdin)['Self']['HostName'])" 2>/dev/null || hostname -s)
 log "Tailscale hostname: $TS_HOSTNAME"
+
+# ---------- 2b. Set hostname to match Slurm NodeName -------------------------
+# slurmd determines its identity by matching the OS hostname against NodeName
+# entries in slurm.conf.  If they don't match you get:
+#   "fatal: Unable to determine this slurmd's NodeName"
+if [[ -n "$NODE_NAME" ]]; then
+    log "Setting OS hostname to '$NODE_NAME' (to match slurm.conf NodeName)..."
+    hostnamectl set-hostname "$NODE_NAME" 2>/dev/null || hostname "$NODE_NAME"
+    # Persist in /etc/hostname for next boot
+    echo "$NODE_NAME" > /etc/hostname
+    # Add to /etc/hosts so the name resolves locally
+    if ! grep -q "$NODE_NAME" /etc/hosts; then
+        echo "127.0.1.1  $NODE_NAME" >> /etc/hosts
+    fi
+    log "Hostname set to: $(hostname)"
+else
+    NODE_NAME=$(hostname -s)
+    warn "No --node-name given. Using current hostname '$NODE_NAME'."
+    warn "Make sure a NodeName=$NODE_NAME entry exists in slurm.conf!"
+fi
 
 # ---------- 3. MUNGE authentication ------------------------------------------
 log "Configuring MUNGE authentication..."
@@ -168,14 +201,26 @@ if $IS_HEAD; then
 fi
 
 log "Starting Slurm compute daemon (slurmd)..."
+# Create a systemd override to pass the explicit node name to slurmd.
+# This avoids the "Unable to determine this slurmd's NodeName" fatal error
+# when the OS hostname doesn't exactly match a NodeName in slurm.conf.
+mkdir -p /etc/systemd/system/slurmd.service.d
+cat > /etc/systemd/system/slurmd.service.d/nodename.conf <<EOF
+[Service]
+ExecStart=
+ExecStart=/usr/sbin/slurmd -D -N $NODE_NAME \$SLURMD_OPTIONS
+EOF
+systemctl daemon-reload
 systemctl enable slurmd
 systemctl restart slurmd
+log "slurmd started with NodeName=$NODE_NAME"
 
 # ---------- 10. Summary -----------------------------------------------------
 echo
 echo "============================================"
 echo " Node setup complete!"
 echo "============================================"
+echo " Slurm NodeName:   $NODE_NAME"
 echo " Tailscale IP:     $TS_IP"
 echo " Tailscale host:   $TS_HOSTNAME"
 echo " Node role:        $($IS_HEAD && echo "HEAD + COMPUTE" || echo "COMPUTE")"
