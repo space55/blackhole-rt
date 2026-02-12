@@ -1,0 +1,73 @@
+# ============================================================================
+# Slurm Configuration Template — Black Hole Ray Tracer Cluster
+# ============================================================================
+# Copy this to /etc/slurm/slurm.conf on ALL nodes (head + compute) and
+# customise the node list / Tailscale IPs.
+#
+# Tailscale hostnames are used as NodeAddr so Slurm traffic routes
+# through the Tailscale mesh automatically.
+# ============================================================================
+
+# ---------- Cluster identity ------------------------------------------------
+ClusterName=bhrt-cluster
+SlurmctldHost=HEAD_NODE_TAILSCALE_HOSTNAME   # e.g. head-node
+
+# ---------- Daemons & paths -------------------------------------------------
+SlurmUser=slurm
+SlurmdUser=root
+SlurmctldPort=6817
+SlurmdPort=6818
+AuthType=auth/munge
+StateSaveLocation=/var/spool/slurmctld
+SlurmdSpoolDir=/var/spool/slurmd
+SlurmctldPidFile=/var/run/slurmctld.pid
+SlurmdPidFile=/var/run/slurmd.pid
+SlurmctldLogFile=/var/log/slurm/slurmctld.log
+SlurmdLogFile=/var/log/slurm/slurmd.log
+
+# ---------- Scheduling ------------------------------------------------------
+SchedulerType=sched/backfill
+SelectType=select/cons_tres
+SelectTypeParameters=CR_Core_Memory
+ProctrackType=proctrack/linuxprocs
+ReturnToService=2            # nodes come back online automatically
+
+# ---------- Job defaults ----------------------------------------------------
+DefMemPerCPU=2048            # 2 GB per CPU default
+MaxMemPerCPU=0               # unlimited
+TaskPlugin=task/affinity
+
+# ---------- Timeouts (generous for Tailscale latency) -----------------------
+SlurmctldTimeout=120
+SlurmdTimeout=120
+InactiveLimit=0
+MinJobAge=300
+KillWait=30
+Waittime=0
+
+# ---------- GPU support (optional) ------------------------------------------
+# GresTypes=gpu
+
+# ============================================================================
+# PARTITION & NODE DEFINITIONS
+# ============================================================================
+# Instructions:
+#   1. Replace the example entries below with your real machines.
+#   2. NodeAddr MUST be the Tailscale IP or hostname for each node.
+#   3. Run `tailscale status` on each machine to get the address.
+#   4. CPUs/RealMemory should match the actual hardware.
+#   5. For GPU nodes, uncomment GresTypes above and add Gres=gpu:1, etc.
+# ============================================================================
+
+# --- Example CPU-only nodes -------------------------------------------------
+# NodeName=node01 NodeAddr=100.x.y.1  CPUs=8  RealMemory=16000  State=UNKNOWN
+# NodeName=node02 NodeAddr=100.x.y.2  CPUs=16 RealMemory=32000  State=UNKNOWN
+# NodeName=node03 NodeAddr=100.x.y.3  CPUs=8  RealMemory=16000  State=UNKNOWN
+
+# --- Example GPU nodes (uncomment GresTypes=gpu above) ----------------------
+# NodeName=gpu01  NodeAddr=100.x.y.10 CPUs=16 RealMemory=64000  Gres=gpu:1  State=UNKNOWN
+# NodeName=gpu02  NodeAddr=100.x.y.11 CPUs=16 RealMemory=64000  Gres=gpu:2  State=UNKNOWN
+
+# --- Partitions -------------------------------------------------------------
+# PartitionName=cpu   Nodes=node01,node02,node03  Default=YES  MaxTime=INFINITE  State=UP
+# PartitionName=gpu   Nodes=gpu01,gpu02            Default=NO   MaxTime=INFINITE  State=UP
