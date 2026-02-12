@@ -20,7 +20,7 @@
 #   -c CPUS      CPUs per frame task                 (default: 4)
 #   -m MEMORY    Memory per task (e.g. 4G)           (default: 4G)
 #   -T TIME      Max wall time per frame             (default: 01:00:00)
-#   --gpu        Submit to gpu partition with 1 GPU  (default: on)
+#   --cpu        Submit to cpu only partition.       (default: off)
 #   --dry-run    Show the sbatch command without submitting
 #   -h           Show this help
 # ============================================================================
@@ -56,7 +56,7 @@ while [[ $# -gt 0 ]]; do
         -c)         CPUS="$2"; shift 2 ;;
         -m)         MEMORY="$2"; shift 2 ;;
         -T)         WALL_TIME="$2"; shift 2 ;;
-        --gpu)      USE_GPU=true; PARTITION="gpu"; shift ;;
+        --cpu)      USE_GPU=false; PARTITION="cpu"; shift ;;
         --dry-run)  DRY_RUN=true; shift ;;
         -h|--help)
             head -27 "$0" | tail -24

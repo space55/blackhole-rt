@@ -18,10 +18,9 @@
 #SBATCH --output=/opt/bhrt/build/logs/frame_%A_%a.out
 #SBATCH --error=/opt/bhrt/build/logs/frame_%A_%a.err
 #SBATCH --ntasks=1
-#SBATCH --cpus-per-task=4
-#SBATCH --mem=4G
-#SBATCH --time=01:00:00
-#SBATCH --partition=gpu
+# NOTE: --cpus-per-task, --mem, --time, --partition, and --gres are set by
+# submit_render.sh on the sbatch command line so they can be easily overridden.
+# Do NOT hardcode them here or they will conflict with CLI arguments.
 
 # ---------- Configuration (from environment or defaults) ---------------------
 PROJECT_DIR="${BHRT_PROJECT_DIR:-/opt/bhrt}"
