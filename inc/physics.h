@@ -556,7 +556,7 @@ BH_FUNC inline bool advance_ray(dvec3 &pos, dvec3 &vel, double &cached_r,
 {
     const double r_plus = pp.r_plus;
 
-    if (cached_r > 30.0 * r_plus)
+    if (cached_r > 15.0 * r_plus)
     {
         // Far-field: RK2 midpoint (2 evaluations)
         double r1;
@@ -617,15 +617,13 @@ BH_FUNC inline bool advance_ray(dvec3 &pos, dvec3 &vel, double &cached_r,
 }
 
 // Volumetric disk sampling with relativistic radiative transfer
+// r_ks is the precomputed Kerr-Schild radius (avoids redundant ks_radius call)
 BH_FUNC inline void sample_disk_volume(const dvec3 &pos, const dvec3 &vel, double ds,
                                        dvec3 &acc_color, double &acc_opacity,
-                                       const PhysicsParams &pp)
+                                       double r_ks, const PhysicsParams &pp)
 {
     if (acc_opacity >= 0.999)
         return;
-
-    // Compute KS radius
-    const double r_ks = ks_radius(pos, pp.bh_spin);
 
     // Contains check
     const double fade_limit = pp.disk_outer_r * 1.2;

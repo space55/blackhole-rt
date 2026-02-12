@@ -210,9 +210,15 @@ int main(int argc, char *argv[])
                             break;
                         }
 
-                        // Sample disk emission along the ray
+                        // Sample disk emission along the ray — cheap guard
+                        // skips the full function when clearly outside the disk
                         const double prev_opacity = acc_opacity;
-                        sample_disk_volume(pos, vel, step_dt, acc_color, acc_opacity, pp);
+                        if (fabs(pos.y) < pp.disk_thickness * 15.0 &&
+                            cached_ks_r >= pp.disk_inner_r * 0.8 &&
+                            cached_ks_r <= pp.disk_outer_r * 1.3)
+                        {
+                            sample_disk_volume(pos, vel, step_dt, acc_color, acc_opacity, cached_ks_r, pp);
+                        }
                         if (acc_opacity > prev_opacity)
                             disk_samples.fetch_add(1, std::memory_order_relaxed);
 

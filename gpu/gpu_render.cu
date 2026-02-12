@@ -36,17 +36,28 @@
 __constant__ GPUSceneParams c_params;
 
 // ============================================================================
-// Render Kernel — one thread per pixel, AA loop inside
+// Render Kernel — persistent-thread work-stealing design
+//
+// Instead of mapping one thread to one pixel via 2D grid coordinates, we
+// launch a fixed number of threads and each one pulls pixel indices from a
+// global atomic counter.  Benefits:
+//
+//  1. Finished threads immediately pick up new work instead of idling while
+//     neighbouring threads in the same warp/block are still integrating
+//     expensive photon-sphere rays.  This eliminates the "tail-end" stall.
+//
+//  2. The work order is interleaved: thread 0 gets pixel 0, thread 1 gets
+//     pixel 1, etc.  Spatially adjacent heavy pixels (around the shadow
+//     edge) are spread across many warps/blocks instead of clustering in
+//     one block.
+//
+//  3. No __syncthreads() needed anywhere — every thread is fully independent.
 // ============================================================================
-__global__ __launch_bounds__(256) void render_kernel(GPUPixelResult *results, int *progress)
+__global__ __launch_bounds__(256, 2) void render_kernel(GPUPixelResult *results,
+                                                        int *progress,
+                                                        int *work_counter,
+                                                        int total_pixels)
 {
-    const int px = blockIdx.x * blockDim.x + threadIdx.x;
-    const int py = blockIdx.y * blockDim.y + threadIdx.y;
-    if (px >= c_params.width || py >= c_params.height)
-        return;
-
-    const int idx = py * c_params.width + px;
-
     // Local copy of physics params (fast reads from constant memory into registers)
     const PhysicsParams pp = c_params.physics;
 
@@ -56,6 +67,7 @@ __global__ __launch_bounds__(256) void render_kernel(GPUPixelResult *results, in
     const dvec3 cam_fwd(c_params.cam_fwd[0], c_params.cam_fwd[1], c_params.cam_fwd[2]);
     const dvec3 cam_pos(c_params.cam_pos[0], c_params.cam_pos[1], c_params.cam_pos[2]);
 
+    const int width = c_params.width;
     const int aa_grid = c_params.aa_grid;
     const double inv_aa = 1.0 / aa_grid;
     const double inv_spp = 1.0 / (double)(aa_grid * aa_grid);
@@ -69,123 +81,149 @@ __global__ __launch_bounds__(256) void render_kernel(GPUPixelResult *results, in
     const double fov_x = c_params.fov_x;
     const double fov_y = c_params.fov_y;
 
-    dvec3 pixel_disk(0, 0, 0);
-    double pixel_sky_weight = 0;
-    dvec3 pixel_exit_dir(0, 0, 0);
+    // Hard iteration cap to bound worst-case rays near the photon sphere
+    const int max_iter = 50000;
 
-    for (int sy = 0; sy < aa_grid; sy++)
+    __syncthreads(); // ensure all threads start together
+
+    // Persistent work loop — each thread grabs one pixel at a time
+    while (true)
     {
-        for (int sx = 0; sx < aa_grid; sx++)
+        const int idx = atomicAdd(work_counter, 1);
+        if (idx >= total_pixels)
+            break;
+
+        const int px = idx % width;
+        const int py = idx / width;
+
+        dvec3 pixel_disk(0, 0, 0);
+        double pixel_sky_weight = 0;
+        dvec3 pixel_exit_dir(0, 0, 0);
+
+        for (int sy = 0; sy < aa_grid; sy++)
         {
-            const double sub_x = (px + (sx + 0.5) * inv_aa) / width_d;
-            const double sub_y = (py + (sy + 0.5) * inv_aa) / height_d;
-
-            // Initialize ray using shared physics
-            dvec3 pos, vel;
-            init_ray(pos, vel, cam_pos, cam_right, cam_up, cam_fwd,
-                     sub_x, sub_y, fov_x, fov_y);
-
-            dvec3 acc_color(0, 0, 0);
-            double acc_opacity = 0;
-            double cached_r = ks_radius(pos, pp.bh_spin);
-            bool hit_bh = false;
-            double affine = 0;
-
-            while (affine < max_affine)
+            for (int sx = 0; sx < aa_grid; sx++)
             {
-                const double delta = fmax(cached_r - r_plus, 0.01);
-                double step_dt = base_dt * dclamp(delta * delta, 0.0001, 1.0);
+                const double sub_x = (px + (sx + 0.5) * inv_aa) / width_d;
+                const double sub_y = (py + (sy + 0.5) * inv_aa) / height_d;
 
-                // Step size reduction near disk
-                if (cached_r >= pp.disk_inner_r * 0.8 && cached_r <= pp.disk_outer_r * 1.2)
+                // Initialize ray using shared physics
+                dvec3 pos, vel;
+                init_ray(pos, vel, cam_pos, cam_right, cam_up, cam_fwd,
+                         sub_x, sub_y, fov_x, fov_y);
+
+                dvec3 acc_color(0, 0, 0);
+                double acc_opacity = 0;
+                double cached_r = ks_radius(pos, pp.bh_spin);
+                bool hit_bh = false;
+                double affine = 0;
+                int iter = 0;
+
+                while (affine < max_affine && iter < max_iter)
                 {
-                    const double h = disk_half_thickness(cached_r, pp);
-                    const double y_dist = fabs(pos.y);
-                    if (y_dist < 5.0 * h)
+                    ++iter;
+                    const double delta = fmax(cached_r - r_plus, 0.01);
+                    double step_dt = base_dt * dclamp(delta * delta, 0.001, 1.0);
+
+                    // Step size reduction near disk
+                    if (cached_r >= pp.disk_inner_r * 0.8 && cached_r <= pp.disk_outer_r * 1.2)
                     {
-                        step_dt = fmin(step_dt, fmax(0.3 * h, 0.005));
+                        const double h = disk_half_thickness(cached_r, pp);
+                        const double y_dist = fabs(pos.y);
+                        if (y_dist < 5.0 * h)
+                        {
+                            step_dt = fmin(step_dt, fmax(0.3 * h, 0.005));
+                        }
                     }
+
+                    if (!advance_ray(pos, vel, cached_r, step_dt, pp))
+                    {
+                        hit_bh = true;
+                        break;
+                    }
+
+                    // Validate ray state BEFORE disk sampling.  Under
+                    // --use_fast_math, NaN slips past fmax/fmin guards and
+                    // NaN comparisons return false, so NaN position would
+                    // bypass range checks inside sample_disk_volume and
+                    // corrupt acc_opacity — poisoning the sky transmittance
+                    // while leaving acc_color intact (appearing as sky-only
+                    // noise).
+                    if (!bh_isfinite(vel.squaredNorm()) || !bh_isfinite(cached_r))
+                    {
+                        hit_bh = true;
+                        break;
+                    }
+
+                    // Cheap vertical check: skip disk sampling entirely when
+                    // far above/below the disk plane (avoids expensive inner
+                    // computation for the vast majority of ray steps)
+                    if (fabs(pos.y) < pp.disk_thickness * 15.0 &&
+                        cached_r >= pp.disk_inner_r * 0.8 &&
+                        cached_r <= pp.disk_outer_r * 1.3)
+                    {
+                        sample_disk_volume(pos, vel, step_dt, acc_color, acc_opacity, cached_r, pp);
+                    }
+
+                    affine += step_dt;
+                    if (cached_r <= r_plus)
+                    {
+                        hit_bh = true;
+                        break;
+                    }
+                    if (pos.squaredNorm() > escape_r2)
+                        break;
+                    if (acc_opacity > 0.99)
+                        break;
                 }
 
-                if (!advance_ray(pos, vel, cached_r, step_dt, pp))
+                pixel_disk += acc_color;
+                if (!hit_bh && bh_isfinite(acc_opacity))
                 {
-                    hit_bh = true;
-                    break;
+                    double transmittance = 1.0 - acc_opacity;
+                    pixel_sky_weight += transmittance;
+                    pixel_exit_dir += transmittance * vel;
                 }
-
-                // Validate ray state BEFORE disk sampling.  Under
-                // --use_fast_math, NaN slips past fmax/fmin guards and
-                // NaN comparisons return false, so NaN position would
-                // bypass range checks inside sample_disk_volume and
-                // corrupt acc_opacity — poisoning the sky transmittance
-                // while leaving acc_color intact (appearing as sky-only
-                // noise).
-                if (!bh_isfinite(vel.squaredNorm()) || !bh_isfinite(cached_r))
-                {
-                    hit_bh = true;
-                    break;
-                }
-
-                sample_disk_volume(pos, vel, step_dt, acc_color, acc_opacity, pp);
-
-                affine += step_dt;
-                if (cached_r <= r_plus)
-                {
-                    hit_bh = true;
-                    break;
-                }
-                if (pos.squaredNorm() > escape_r2)
-                    break;
-                if (acc_opacity > 0.99)
-                    break;
-            }
-
-            pixel_disk += acc_color;
-            if (!hit_bh && bh_isfinite(acc_opacity))
-            {
-                double transmittance = 1.0 - acc_opacity;
-                pixel_sky_weight += transmittance;
-                pixel_exit_dir += transmittance * vel;
             }
         }
+
+        pixel_disk *= inv_spp;
+        pixel_sky_weight *= inv_spp;
+        pixel_exit_dir *= inv_spp;
+
+        // Sanitise outputs.  --use_fast_math can let NaN slip through in rare
+        // edge cases.  For the exit direction we must validate ATOMICALLY: if
+        // any component is non-finite, zero the ENTIRE direction + weight so
+        // the CPU sky mapper never sees a partially-corrupted direction
+        // pointing to a random sky location.
+        auto is_finite_d = [](double v) -> bool {
+            unsigned long long b = __double_as_longlong(v);
+            return ((b >> 52) & 0x7FFull) != 0x7FFull;
+        };
+
+        if (!is_finite_d(pixel_sky_weight) || !is_finite_d(pixel_exit_dir.x) ||
+            !is_finite_d(pixel_exit_dir.y) || !is_finite_d(pixel_exit_dir.z))
+        {
+            pixel_sky_weight = 0;
+            pixel_exit_dir = dvec3(0, 0, 0);
+        }
+
+        // Disk components can be sanitised individually (no directional semantics)
+        if (!is_finite_d(pixel_disk.x)) pixel_disk.x = 0;
+        if (!is_finite_d(pixel_disk.y)) pixel_disk.y = 0;
+        if (!is_finite_d(pixel_disk.z)) pixel_disk.z = 0;
+
+        results[idx].disk_r = (float)pixel_disk.x;
+        results[idx].disk_g = (float)pixel_disk.y;
+        results[idx].disk_b = (float)pixel_disk.z;
+        results[idx].sky_weight = (float)pixel_sky_weight;
+        results[idx].exit_vx = (float)pixel_exit_dir.x;
+        results[idx].exit_vy = (float)pixel_exit_dir.y;
+        results[idx].exit_vz = (float)pixel_exit_dir.z;
+
+        // Update progress counter (visible to host via mapped pinned memory)
+        atomicAdd(progress, 1);
     }
-
-    pixel_disk *= inv_spp;
-    pixel_sky_weight *= inv_spp;
-    pixel_exit_dir *= inv_spp;
-
-    // Sanitise outputs.  --use_fast_math can let NaN slip through in rare
-    // edge cases.  For the exit direction we must validate ATOMICALLY: if
-    // any component is non-finite, zero the ENTIRE direction + weight so
-    // the CPU sky mapper never sees a partially-corrupted direction
-    // pointing to a random sky location.
-    auto is_finite_d = [](double v) -> bool {
-        unsigned long long b = __double_as_longlong(v);
-        return ((b >> 52) & 0x7FFull) != 0x7FFull;
-    };
-
-    if (!is_finite_d(pixel_sky_weight) || !is_finite_d(pixel_exit_dir.x) ||
-        !is_finite_d(pixel_exit_dir.y) || !is_finite_d(pixel_exit_dir.z))
-    {
-        pixel_sky_weight = 0;
-        pixel_exit_dir = dvec3(0, 0, 0);
-    }
-
-    // Disk components can be sanitised individually (no directional semantics)
-    if (!is_finite_d(pixel_disk.x)) pixel_disk.x = 0;
-    if (!is_finite_d(pixel_disk.y)) pixel_disk.y = 0;
-    if (!is_finite_d(pixel_disk.z)) pixel_disk.z = 0;
-
-    results[idx].disk_r = (float)pixel_disk.x;
-    results[idx].disk_g = (float)pixel_disk.y;
-    results[idx].disk_b = (float)pixel_disk.z;
-    results[idx].sky_weight = (float)pixel_sky_weight;
-    results[idx].exit_vx = (float)pixel_exit_dir.x;
-    results[idx].exit_vy = (float)pixel_exit_dir.y;
-    results[idx].exit_vz = (float)pixel_exit_dir.z;
-
-    // Update progress counter (visible to host via mapped pinned memory)
-    atomicAdd(progress, 1);
 }
 
 // ============================================================================
@@ -227,16 +265,26 @@ bool gpu_render(const GPUSceneParams &params, GPUPixelResult *host_results)
     *h_progress = 0;
     CUDA_CHECK(cudaHostGetDevicePointer(&d_progress, h_progress, 0));
 
-    // Launch kernel
-    dim3 block(16, 16);
-    dim3 grid((params.width + 15) / 16, (params.height + 15) / 16);
+    // Allocate device work counter for persistent-thread work-stealing
+    int *d_work_counter = nullptr;
+    CUDA_CHECK(cudaMalloc(&d_work_counter, sizeof(int)));
+    CUDA_CHECK(cudaMemset(d_work_counter, 0, sizeof(int)));
+
+    // Launch persistent-thread kernel: 256 threads/block, enough blocks to
+    // fill all SMs with ~2 blocks each for latency hiding.  The work-stealing
+    // loop inside the kernel handles the pixel→thread mapping dynamically.
+    const int threads_per_block = 256;
+    const int blocks = prop.multiProcessorCount * 2;
+    printf("GPU launch: %d blocks × %d threads = %d persistent threads\n",
+           blocks, threads_per_block, blocks * threads_per_block);
 
     cudaEvent_t start, stop;
     CUDA_CHECK(cudaEventCreate(&start));
     CUDA_CHECK(cudaEventCreate(&stop));
     CUDA_CHECK(cudaEventRecord(start));
 
-    render_kernel<<<grid, block>>>(d_results, d_progress);
+    render_kernel<<<blocks, threads_per_block>>>(d_results, d_progress,
+                                                  d_work_counter, num_pixels);
 
     CUDA_CHECK(cudaGetLastError());
     CUDA_CHECK(cudaEventRecord(stop));
@@ -251,8 +299,8 @@ bool gpu_render(const GPUSceneParams &params, GPUPixelResult *host_results)
         double elapsed = std::chrono::duration<double>(now - poll_start).count();
         double rate = (elapsed > 0.01) ? done / elapsed : 0;
         double eta = (rate > 0 && done < num_pixels) ? (num_pixels - done) / rate : 0;
-        printf("\rGPU progress: %6.2f%% (%d / %d px)  %.1f Mpx/s  ETA %.1fs   ",
-               pct, done, num_pixels, rate / 1e6, eta);
+        printf("\rGPU progress: %6.2f%% (%d / %d px)  %.1f Kpx/s  ETA %.1fs   ",
+               pct, done, num_pixels, rate / 1e3, eta);
         fflush(stdout);
         std::this_thread::sleep_for(std::chrono::milliseconds(250));
     }
@@ -271,6 +319,7 @@ bool gpu_render(const GPUSceneParams &params, GPUPixelResult *host_results)
 
     // Cleanup
     cudaFree(d_results);
+    cudaFree(d_work_counter);
     cudaFreeHost(h_progress);
     cudaEventDestroy(start);
     cudaEventDestroy(stop);
