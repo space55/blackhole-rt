@@ -168,6 +168,58 @@ else
     warn "No slurm.conf template found. Create $SLURM_CONF manually."
 fi
 
+# ---------- 5b. Auto-register this node in slurm.conf -----------------------
+# If there's no NodeName entry for this machine, add one automatically using
+# detected hardware specs and the Tailscale IP.
+if [[ -f "$SLURM_CONF" ]] && ! grep -q "^NodeName=$NODE_NAME " "$SLURM_CONF"; then
+    log "No NodeName=$NODE_NAME found in $SLURM_CONF — adding automatically..."
+
+    NODE_CPUS=$(nproc)
+    NODE_MEM_KB=$(grep MemTotal /proc/meminfo | awk '{print $2}')
+    NODE_MEM_MB=$((NODE_MEM_KB / 1024))
+    # Reserve ~5% for OS overhead, Slurm wants RealMemory in MB
+    NODE_REAL_MEM=$(( NODE_MEM_MB * 95 / 100 ))
+
+    NODE_GRES=""
+    if command -v nvidia-smi &>/dev/null; then
+        GPU_COUNT=$(nvidia-smi --query-gpu=name --format=csv,noheader 2>/dev/null | wc -l | tr -d ' ')
+        if [[ "$GPU_COUNT" -gt 0 ]]; then
+            NODE_GRES="Gres=gpu:$GPU_COUNT"
+            # Ensure GresTypes=gpu is uncommented
+            if grep -q "^# *GresTypes=gpu" "$SLURM_CONF"; then
+                sed -i 's/^# *GresTypes=gpu/GresTypes=gpu/' "$SLURM_CONF"
+                log "Enabled GresTypes=gpu in $SLURM_CONF"
+            fi
+        fi
+    fi
+
+    NODE_LINE="NodeName=$NODE_NAME NodeAddr=$TS_IP CPUs=$NODE_CPUS RealMemory=$NODE_REAL_MEM $NODE_GRES State=UNKNOWN"
+    echo "" >> "$SLURM_CONF"
+    echo "# Auto-added by setup_node.sh on $(date -Iseconds)" >> "$SLURM_CONF"
+    echo "$NODE_LINE" >> "$SLURM_CONF"
+    log "Added: $NODE_LINE"
+
+    # Ensure a default partition exists that includes this node
+    if ! grep -q "^PartitionName=.*Nodes=.*$NODE_NAME" "$SLURM_CONF"; then
+        # Check if there's an existing default partition to append to
+        EXISTING_PARTITION=$(grep "^PartitionName=.*Default=YES" "$SLURM_CONF" 2>/dev/null | head -1 || true)
+        if [[ -n "$EXISTING_PARTITION" ]]; then
+            # Append this node to the existing partition's Nodes= list
+            UPDATED=$(echo "$EXISTING_PARTITION" | sed "s/Nodes=\([^ ]*\)/Nodes=\1,$NODE_NAME/")
+            sed -i "s|^${EXISTING_PARTITION}|${UPDATED}|" "$SLURM_CONF"
+            log "Appended $NODE_NAME to existing default partition."
+        else
+            PART_NAME="compute"
+            [[ -n "$NODE_GRES" ]] && PART_NAME="gpu"
+            PART_LINE="PartitionName=$PART_NAME Nodes=$NODE_NAME Default=YES MaxTime=INFINITE State=UP"
+            echo "$PART_LINE" >> "$SLURM_CONF"
+            log "Added partition: $PART_LINE"
+        fi
+    fi
+else
+    [[ -f "$SLURM_CONF" ]] && log "NodeName=$NODE_NAME already present in $SLURM_CONF."
+fi
+
 # ---------- 6. Shared project directory --------------------------------------
 PROJECT_DIR="/opt/bhrt"
 log "Setting up shared project directory at $PROJECT_DIR ..."
