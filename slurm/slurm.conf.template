@@ -29,13 +29,13 @@ SlurmdLogFile=/var/log/slurm/slurmd.log
 SchedulerType=sched/backfill
 SelectType=select/cons_tres
 SelectTypeParameters=CR_Core_Memory
-ProctrackType=proctrack/linuxprocs
+ProctrackType=proctrack/cgroup       # use cgroup (linuxprocs was removed in newer Slurm)
 ReturnToService=2            # nodes come back online automatically
 
 # ---------- Job defaults ----------------------------------------------------
 DefMemPerCPU=2048            # 2 GB per CPU default
 MaxMemPerCPU=0               # unlimited
-TaskPlugin=task/affinity
+TaskPlugin=task/affinity,task/cgroup
 
 # ---------- Mail (disabled — no MTA needed on render nodes) -----------------
 MailProg=/bin/true
