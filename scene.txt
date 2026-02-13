@@ -24,14 +24,14 @@ sky_offset_u    = 0.5           # horizontal pan of sky texture (0-1 wraps aroun
 sky_offset_v    = 0.0           # vertical pan of sky texture (0-1 wraps around)
 
 # --- Camera -----------------------------------------------------------------
-camera_x        = -25.0         # camera position (Cartesian)
-camera_y        = 5.0
+camera_x        = -30.0         # camera position (Cartesian)
+camera_y        = 1.75
 camera_z        = 0.0
-camera_pitch    = 10.0          # rotation in degrees
+camera_pitch    = 0.0          # rotation in degrees
 camera_yaw      = 90.0
-camera_roll     = 0.0
-fov_x           = 180.0         # horizontal field of view (degrees)
-fov_y           = 90.0         # vertical   field of view (degrees)
+camera_roll     = -20.0
+fov_x           = 90.0         # horizontal field of view (degrees)
+fov_y           = 45.0         # vertical   field of view (degrees)
 
 # --- Black hole -------------------------------------------------------------
 bh_mass         = 1.0           # mass parameter M
@@ -39,19 +39,19 @@ bh_spin         = 0.999         # spin  parameter a  (|a| < M)
 
 # --- Ray integration --------------------------------------------------------
 base_dt         = 0.1           # base integration step
-max_affine      = 100.0         # max affine parameter (ray lifetime)
-escape_radius   = 50.0          # rays beyond this radius are considered escaped
+max_affine      = 200.0         # max affine parameter (ray lifetime)
+escape_radius   = 75.0          # rays beyond this radius are considered escaped
 
 # --- Accretion disk geometry ------------------------------------------------
 disk_outer_r    = 20.0          # outer edge in M
 disk_thickness  = 0.5           # half-thickness scale height
 disk_density    = 20.0          # base density ρ₀
-disk_opacity    = 0.5           # absorption per unit density κ₀
+disk_opacity    = 1.0           # absorption per unit density κ₀
 
 # --- Accretion disk appearance ----------------------------------------------
 disk_emission_boost   = 10.0    # brightness multiplier (does not affect opacity)
-disk_color_variation  = 0.7     # 0 = physically accurate, 1 = full cinematic colour
-disk_turbulence       = 0.8     # 0 = smooth uniform disk, 1 = torn-apart debris ring
+disk_color_variation  = 1.0     # 0 = physically accurate, 1 = full cinematic colour
+disk_turbulence       = 1.0     # 0 = smooth uniform disk, 1 = torn-apart debris ring
 
 # --- Disk flat mode ---------------------------------------------------------
 # Toggle for a thin, highly textured, opaque disk appearance.
