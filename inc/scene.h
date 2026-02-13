@@ -53,6 +53,9 @@ struct scene_config_s
     double disk_color_variation = 0.7;
     double disk_turbulence = 0.0;
 
+    // Flat disk mode: 0 = normal volumetric disk, 1 = thin/flat with rich texture & high opacity
+    int disk_flat_mode = 0;
+
     // Tone mapping
     double tonemap_compression = 1.0;
 

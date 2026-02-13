@@ -53,6 +53,12 @@ disk_emission_boost   = 10.0    # brightness multiplier (does not affect opacity
 disk_color_variation  = 0.7     # 0 = physically accurate, 1 = full cinematic colour
 disk_turbulence       = 0.8     # 0 = smooth uniform disk, 1 = torn-apart debris ring
 
+# --- Disk flat mode ---------------------------------------------------------
+# Toggle for a thin, highly textured, opaque disk appearance.
+#   0 = normal volumetric disk (puffy, semi-transparent)
+#   1 = flat mode (thin, rich procedural texture, solid/opaque)
+disk_flat_mode        = 1
+
 # --- Tone mapping -----------------------------------------------------------
 # Inverse-logarithmic compression applied to disk emission.
 #   0.0 = linear (true-to-life, physically accurate)

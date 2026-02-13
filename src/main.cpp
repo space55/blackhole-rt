@@ -47,7 +47,8 @@ int main(int argc, char *argv[])
         cfg.disk_outer_r, cfg.disk_thickness,
         cfg.disk_density, cfg.disk_opacity,
         cfg.disk_emission_boost, cfg.disk_color_variation,
-        cfg.disk_turbulence, cfg.time);
+        cfg.disk_turbulence, cfg.time,
+        cfg.disk_flat_mode);
 
     printf("Black hole: M=%.1f, a=%.2f, r+=%.4f, r_isco=%.4f\n",
            pp.bh_mass, pp.bh_spin, pp.r_plus, pp.disk_inner_r);
@@ -69,8 +70,8 @@ int main(int argc, char *argv[])
 
     // Extract camera basis vectors
     const dvec3 cam_right = cam_rot_matrix.col(0);
-    const dvec3 cam_up    = cam_rot_matrix.col(1);
-    const dvec3 cam_fwd   = cam_rot_matrix.col(2);
+    const dvec3 cam_up = cam_rot_matrix.col(1);
+    const dvec3 cam_fwd = cam_rot_matrix.col(2);
 
     // Precompute sky rotation matrix
     const dmat3 sky_rot = dmat3::rotation_y(cfg.sky_yaw * M_PI / 180.0) *
@@ -194,7 +195,9 @@ int main(int argc, char *argv[])
                         double step_dt = base_dt * std::clamp(delta * delta, 0.0001, 1.0);
 
                         // Reduce step size when near the disk
-                        if (r_ks >= pp.disk_inner_r * 0.8 && r_ks <= pp.disk_outer_r * 1.2)
+                        const double disk_inner_guard = pp.disk_flat_mode ? pp.disk_inner_r * 0.4 : pp.disk_inner_r * 0.8;
+                        const double disk_outer_guard = pp.disk_flat_mode ? pp.disk_outer_r * 1.6 : pp.disk_outer_r * 1.2;
+                        if (r_ks >= disk_inner_guard && r_ks <= disk_outer_guard)
                         {
                             const double h = disk_half_thickness(r_ks, pp);
                             const double y_dist = fabs(pos.y);
@@ -213,9 +216,11 @@ int main(int argc, char *argv[])
                         // Sample disk emission along the ray — cheap guard
                         // skips the full function when clearly outside the disk
                         const double prev_opacity = acc_opacity;
+                        const double samp_inner_guard = pp.disk_flat_mode ? pp.disk_inner_r * 0.4 : pp.disk_inner_r * 0.8;
+                        const double samp_outer_guard = pp.disk_flat_mode ? pp.disk_outer_r * 1.6 : pp.disk_outer_r * 1.3;
                         if (fabs(pos.y) < pp.disk_thickness * 15.0 &&
-                            cached_ks_r >= pp.disk_inner_r * 0.8 &&
-                            cached_ks_r <= pp.disk_outer_r * 1.3)
+                            cached_ks_r >= samp_inner_guard &&
+                            cached_ks_r <= samp_outer_guard)
                         {
                             sample_disk_volume(pos, vel, step_dt, acc_color, acc_opacity, cached_ks_r, pp);
                         }
@@ -304,7 +309,8 @@ int main(int argc, char *argv[])
         {
             double w_ideal = sqrt(12.0 * sigma * sigma / BOX_PASSES + 1.0);
             int w_lo = ((int)w_ideal) | 1;
-            if (w_lo < 1) w_lo = 1;
+            if (w_lo < 1)
+                w_lo = 1;
             int w_hi = w_lo + 2;
             double target_var = sigma * sigma;
             double var_lo = (w_lo * w_lo - 1) / 12.0;

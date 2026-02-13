@@ -126,7 +126,9 @@ __global__ __launch_bounds__(256, 2) void render_kernel(GPUPixelResult *results,
                     double step_dt = base_dt * dclamp(delta * delta, 0.001, 1.0);
 
                     // Step size reduction near disk
-                    if (cached_r >= pp.disk_inner_r * 0.8 && cached_r <= pp.disk_outer_r * 1.2)
+                    const double disk_inner_guard = pp.disk_flat_mode ? pp.disk_inner_r * 0.4 : pp.disk_inner_r * 0.8;
+                    const double disk_outer_guard = pp.disk_flat_mode ? pp.disk_outer_r * 1.6 : pp.disk_outer_r * 1.2;
+                    if (cached_r >= disk_inner_guard && cached_r <= disk_outer_guard)
                     {
                         const double h = disk_half_thickness(cached_r, pp);
                         const double y_dist = fabs(pos.y);
@@ -158,9 +160,11 @@ __global__ __launch_bounds__(256, 2) void render_kernel(GPUPixelResult *results,
                     // Cheap vertical check: skip disk sampling entirely when
                     // far above/below the disk plane (avoids expensive inner
                     // computation for the vast majority of ray steps)
+                    const double samp_inner_guard = pp.disk_flat_mode ? pp.disk_inner_r * 0.4 : pp.disk_inner_r * 0.8;
+                    const double samp_outer_guard = pp.disk_flat_mode ? pp.disk_outer_r * 1.6 : pp.disk_outer_r * 1.3;
                     if (fabs(pos.y) < pp.disk_thickness * 15.0 &&
-                        cached_r >= pp.disk_inner_r * 0.8 &&
-                        cached_r <= pp.disk_outer_r * 1.3)
+                        cached_r >= samp_inner_guard &&
+                        cached_r <= samp_outer_guard)
                     {
                         sample_disk_volume(pos, vel, step_dt, acc_color, acc_opacity, cached_r, pp);
                     }
@@ -196,7 +200,8 @@ __global__ __launch_bounds__(256, 2) void render_kernel(GPUPixelResult *results,
         // any component is non-finite, zero the ENTIRE direction + weight so
         // the CPU sky mapper never sees a partially-corrupted direction
         // pointing to a random sky location.
-        auto is_finite_d = [](double v) -> bool {
+        auto is_finite_d = [](double v) -> bool
+        {
             unsigned long long b = __double_as_longlong(v);
             return ((b >> 52) & 0x7FFull) != 0x7FFull;
         };
@@ -209,9 +214,12 @@ __global__ __launch_bounds__(256, 2) void render_kernel(GPUPixelResult *results,
         }
 
         // Disk components can be sanitised individually (no directional semantics)
-        if (!is_finite_d(pixel_disk.x)) pixel_disk.x = 0;
-        if (!is_finite_d(pixel_disk.y)) pixel_disk.y = 0;
-        if (!is_finite_d(pixel_disk.z)) pixel_disk.z = 0;
+        if (!is_finite_d(pixel_disk.x))
+            pixel_disk.x = 0;
+        if (!is_finite_d(pixel_disk.y))
+            pixel_disk.y = 0;
+        if (!is_finite_d(pixel_disk.z))
+            pixel_disk.z = 0;
 
         results[idx].disk_r = (float)pixel_disk.x;
         results[idx].disk_g = (float)pixel_disk.y;
@@ -284,7 +292,7 @@ bool gpu_render(const GPUSceneParams &params, GPUPixelResult *host_results)
     CUDA_CHECK(cudaEventRecord(start));
 
     render_kernel<<<blocks, threads_per_block>>>(d_results, d_progress,
-                                                  d_work_counter, num_pixels);
+                                                 d_work_counter, num_pixels);
 
     CUDA_CHECK(cudaGetLastError());
     CUDA_CHECK(cudaEventRecord(stop));
@@ -293,7 +301,7 @@ bool gpu_render(const GPUSceneParams &params, GPUPixelResult *host_results)
     auto poll_start = std::chrono::steady_clock::now();
     while (cudaEventQuery(stop) == cudaErrorNotReady)
     {
-        int done = *h_progress;  // mapped memory: no cudaMemcpy needed
+        int done = *h_progress; // mapped memory: no cudaMemcpy needed
         double pct = 100.0 * done / (double)num_pixels;
         auto now = std::chrono::steady_clock::now();
         double elapsed = std::chrono::duration<double>(now - poll_start).count();

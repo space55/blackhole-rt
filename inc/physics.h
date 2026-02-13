@@ -24,7 +24,7 @@ struct PhysicsParams
     double r_plus; // event horizon radius (precomputed)
 
     // Disk geometry
-    double disk_inner_r;   // ISCO (or custom inner edge)
+    double disk_inner_r; // ISCO (or custom inner edge)
     double disk_outer_r;
     double disk_thickness; // half-thickness scale height at reference radius
     double disk_r_ref;     // sqrt(inner_r * outer_r), precomputed
@@ -38,6 +38,9 @@ struct PhysicsParams
     double disk_color_variation;
     double disk_turbulence;
     double disk_time;
+
+    // Flat disk mode: 0 = normal volumetric, 1 = thin/flat with extra texture & opacity
+    int disk_flat_mode;
 };
 
 // ============================================================================
@@ -218,7 +221,10 @@ BH_FUNC inline dvec3 geodesic_accel(const dvec3 &pos, const dvec3 &vel,
 // Half-thickness: linearly flared, h(r) = thickness * (r / r_ref)
 BH_FUNC inline double disk_half_thickness(double r_ks, const PhysicsParams &pp)
 {
-    return pp.disk_thickness * (r_ks / pp.disk_r_ref);
+    double h = pp.disk_thickness * (r_ks / pp.disk_r_ref);
+    if (pp.disk_flat_mode)
+        h *= 0.15; // flatten to ~15% of normal thickness
+    return h;
 }
 
 // Turbulence-warped half-thickness (azimuthal lumps, gaps, warps)
@@ -226,7 +232,9 @@ BH_FUNC inline double disk_warped_half_thickness(const dvec3 &pos, double r_ks,
                                                  const PhysicsParams &pp)
 {
     const double h0 = disk_half_thickness(fmin(r_ks, pp.disk_outer_r), pp);
-    const double turb = pp.disk_turbulence;
+    double turb = pp.disk_turbulence;
+    if (pp.disk_flat_mode)
+        turb *= 0.65; // allow substantial geometric warping even when flat
     if (turb < 1e-6)
         return h0;
 
@@ -237,21 +245,32 @@ BH_FUNC inline double disk_warped_half_thickness(const dvec3 &pos, double r_ks,
     const double tp = pp.disk_time * omega;
 
     double warp = 0.0;
-    warp += 0.55 * sin(2.0 * (phi + tp) - 3.0 * log_r + 1.2);
-    warp += 0.35 * sin(3.0 * (phi + tp) - 5.0 * log_r + 4.1);
-    warp += 0.25 * sin(5.0 * (phi + tp) - 9.0 * log_r + 0.7);
-    warp += 0.18 * sin(7.0 * (phi + tp) - 11.0 * log_r + 2.9);
-    warp += 0.12 * sin(11.0 * (phi + tp) - 17.0 * log_r + 5.3);
-    warp += 0.08 * sin(17.0 * (phi + tp) - 23.0 * log_r + 3.1);
+    // Circumferential warps — high radial frequency, low azimuthal → concentric ripples
+    warp += 0.55 * sin(1.0 * (phi + tp) - 3.0 * log_r + 1.2);
+    warp += 0.35 * sin(1.0 * (phi + tp) - 5.0 * log_r + 4.1);
+    warp += 0.25 * sin(1.0 * (phi + tp) - 8.0 * log_r + 0.7);
+    warp += 0.18 * sin(2.0 * (phi + tp) - 12.0 * log_r + 2.9);
+    warp += 0.12 * sin(2.0 * (phi + tp) - 18.0 * log_r + 5.3);
+    warp += 0.08 * sin(3.0 * (phi + tp) - 25.0 * log_r + 3.1);
 
-    // Narrow gaps
+    // Narrow gaps — concentric dark rings
     auto dip = [](double phase, double sharpness) -> double
     {
         double s = sin(phase);
         return pow(s * s, sharpness);
     };
-    warp -= 0.70 * dip(3.0 * (phi + tp) - 4.0 * log_r + 2.5, 4.0);
-    warp -= 0.40 * dip(5.0 * (phi + tp) - 8.0 * log_r + 0.3, 5.0);
+    warp -= 0.70 * dip(1.0 * (phi + tp) - 4.0 * log_r + 2.5, 40.0);
+    warp -= 0.40 * dip(1.0 * (phi + tp) - 7.0 * log_r + 0.3, 50.0);
+
+    // Flat-mode extra high-frequency geometric turbulence
+    if (pp.disk_flat_mode)
+    {
+        warp += 0.45 * sin(2.0 * (phi + tp) - 16.0 * log_r + 0.9);
+        warp += 0.35 * sin(3.0 * (phi + tp) - 22.0 * log_r + 3.6);
+        warp += 0.25 * sin(4.0 * (phi + tp) - 30.0 * log_r + 5.8);
+        warp -= 0.50 * dip(1.0 * (phi + tp) - 10.0 * log_r + 1.7, 50.0);
+        warp -= 0.35 * dip(2.0 * (phi + tp) - 15.0 * log_r + 4.3, 60.0);
+    }
 
     const double factor = 1.0 + turb * warp;
     return h0 * fmax(factor, 0.05);
@@ -263,12 +282,17 @@ BH_FUNC inline double disk_clump_factor(const dvec3 &pos, double r_ks,
 {
     const double inner_r = pp.disk_inner_r;
     const double outer_r = pp.disk_outer_r;
-    if (r_ks < inner_r || r_ks > outer_r)
+
+    // In flat mode: extend texture well inside ISCO (infalling streaks)
+    // and beyond outer edge (trailing filaments)
+    const double tex_inner = pp.disk_flat_mode ? inner_r * 0.5 : inner_r;
+    const double tex_outer = pp.disk_flat_mode ? outer_r * 1.4 : outer_r;
+    if (r_ks < tex_inner || r_ks > tex_outer)
         return 1.0;
 
     const double phi = atan2(pos.z, pos.x);
     const double log_r = log(r_ks);
-    const double r_norm = (r_ks - inner_r) / (outer_r - inner_r);
+    const double r_norm = dclamp((r_ks - tex_inner) / (tex_outer - tex_inner), 0.0, 1.0);
 
     const double omega = 1.0 / (r_ks * sqrt(r_ks));
     const double t_phase = pp.disk_time * omega;
@@ -282,36 +306,141 @@ BH_FUNC inline double disk_clump_factor(const dvec3 &pos, double r_ks,
         return pow(s * s, sharpness);
     };
 
+    // Arc-length window: product of sin² at incommensurate radial frequencies
+    // creates quasi-random azimuthal windows (fragmented arcs).
+    // brevity controls arc shortness: 0 = full rings, 1 = ~half-orbit, 3+ = ~1/10th orbit
+    // seed offsets ensure each streak fragments independently.
+    auto arc_window = [](double phi, double log_r, double seed, double brevity) -> double
+    {
+        const double w1 = sin(1.0 * phi + 2.71 * log_r + seed);
+        const double w2 = sin(2.0 * phi - 4.33 * log_r + seed * 1.7 + 1.1);
+        const double w3 = sin(3.0 * phi + 7.19 * log_r + seed * 0.6 + 3.4);
+        return pow(fmax(w1 * w1 * w2 * w2 * w3 * w3, 1e-12), brevity);
+    };
+
     double mod = 0.0;
 
-    // Large-scale spirals
-    mod += 1.4 * streak(2.0 * (phi + t_phase) - 4.5 * log_r + 0.5 + y_phase, 3.0);
-    mod += 0.7 * streak(3.0 * (phi + t_phase) - 7.0 * log_r + 2.1 + 1.5 * y_phase, 2.5);
+    // Large-scale concentric arcs — radial freq dominates for Gargantua look
+    mod += 1.4 * streak(1.0 * (phi + t_phase) - 4.0 * log_r + 0.5 + y_phase, 30.0) * arc_window(phi, log_r, 0.5, 0.4);
+    mod += 0.7 * streak(1.0 * (phi + t_phase) - 6.0 * log_r + 2.1 + 1.5 * y_phase, 25.0) * arc_window(phi, log_r, 2.1, 0.5);
 
-    // Medium-scale
-    mod += 0.45 * streak(7.0 * (phi + t_phase) - 13.0 * log_r + 1.3 + 2.0 * y_phase, 2.0);
-    mod += 0.35 * streak(11.0 * (phi + t_phase) - 19.0 * log_r - 0.8 + 2.5 * y_phase, 2.0);
+    // Medium-scale concentric bands
+    mod += 0.45 * streak(2.0 * (phi + t_phase) - 10.0 * log_r + 1.3 + 2.0 * y_phase, 20.0) * arc_window(phi, log_r, 1.3, 0.6);
+    mod += 0.35 * streak(2.0 * (phi + t_phase) - 14.0 * log_r - 0.8 + 2.5 * y_phase, 20.0) * arc_window(phi, log_r, 3.8, 0.7);
 
-    // Fine-scale
-    mod += 0.25 * sin(17.0 * (phi + t_phase) - 25.0 * log_r + 3.7 + 3.0 * y_phase);
-    mod += 0.15 * sin(23.0 * (phi + t_phase) - 33.0 * log_r + 0.4 + 4.0 * y_phase);
-    mod += 0.10 * sin(31.0 * (phi + t_phase) - 45.0 * log_r + 5.2 + 5.0 * y_phase);
+    // Fine-scale concentric filaments
+    mod += 0.25 * sin(3.0 * (phi + t_phase) - 20.0 * log_r + 3.7 + 3.0 * y_phase) * arc_window(phi, log_r, 3.7, 0.8);
+    mod += 0.15 * sin(3.0 * (phi + t_phase) - 28.0 * log_r + 0.4 + 4.0 * y_phase) * arc_window(phi, log_r, 0.4, 0.9);
+    mod += 0.10 * sin(4.0 * (phi + t_phase) - 36.0 * log_r + 5.2 + 5.0 * y_phase) * arc_window(phi, log_r, 5.2, 1.0);
 
     // Radial hot-spot rings
-    mod += 0.40 * streak(5.0 * r_ks + 1.0 + 0.5 * y_phase, 2.0) *
-           cos(3.0 * (phi + t_phase) - 5.0 * log_r + y_phase);
+    mod += 0.40 * streak(5.0 * r_ks + 1.0 + 0.5 * y_phase, 20.0) *
+           cos(1.0 * (phi + t_phase) - 3.0 * log_r + y_phase) * arc_window(phi, log_r, 1.0, 0.8);
 
     // Bright knots
-    mod += 0.35 * streak(4.0 * M_PI * r_norm, 2.0) *
-           streak(9.0 * (phi + t_phase) - 14.0 * log_r + 1.9 + 2.0 * y_phase, 2.0);
+    mod += 0.35 * streak(4.0 * M_PI * r_norm, 20.0) *
+           streak(2.0 * (phi + t_phase) - 10.0 * log_r + 1.9 + 2.0 * y_phase, 20.0) * arc_window(phi, log_r, 1.9, 1.2);
 
-    // Dark lanes
-    mod -= 0.50 * streak(5.0 * (phi + t_phase) - 8.0 * log_r + 4.0 + 1.8 * y_phase, 4.0);
-    mod -= 0.30 * streak(8.0 * (phi + t_phase) - 15.0 * log_r + 0.7 + 2.2 * y_phase, 5.0);
+    // Dark lanes — concentric gaps
+    mod -= 0.50 * streak(1.0 * (phi + t_phase) - 6.0 * log_r + 4.0 + 1.8 * y_phase, 40.0) * arc_window(phi, log_r, 4.0, 0.6);
+    mod -= 0.30 * streak(1.0 * (phi + t_phase) - 10.0 * log_r + 0.7 + 2.2 * y_phase, 50.0) * arc_window(phi, log_r, 0.7, 0.7);
+
+    // --- Flat-mode extra turbulence: heavy procedural detail at all scales ---
+    if (pp.disk_flat_mode)
+    {
+        // Large-scale concentric arcs (dominant structure)
+        mod += 1.0 * streak(1.0 * (phi + t_phase) - 5.0 * log_r + 3.3 + y_phase, 20.0) * arc_window(phi, log_r, 3.3, 0.5);
+        mod += 0.80 * streak(1.0 * (phi + t_phase) - 8.0 * log_r + 0.8 + 1.2 * y_phase, 25.0) * arc_window(phi, log_r, 0.8, 0.6);
+
+        // Fine concentric filaments — many closely-spaced rings
+        mod += 0.65 * streak(2.0 * (phi + t_phase) - 15.0 * log_r + 2.3 + 1.5 * y_phase, 30.0) * arc_window(phi, log_r, 2.3, 0.8);
+        mod += 0.50 * streak(3.0 * (phi + t_phase) - 22.0 * log_r + 4.7 + 2.0 * y_phase, 25.0) * arc_window(phi, log_r, 4.7, 0.9);
+        mod += 0.40 * streak(3.0 * (phi + t_phase) - 30.0 * log_r + 1.1 + 3.0 * y_phase, 20.0) * arc_window(phi, log_r, 1.1, 1.0);
+        mod += 0.30 * sin(4.0 * (phi + t_phase) - 40.0 * log_r + 3.9 + 2.5 * y_phase) * arc_window(phi, log_r, 3.9, 1.1);
+        mod += 0.25 * sin(5.0 * (phi + t_phase) - 50.0 * log_r + 0.6 + 4.0 * y_phase) * arc_window(phi, log_r, 0.6, 1.2);
+        mod += 0.20 * sin(6.0 * (phi + t_phase) - 60.0 * log_r + 1.4 + 5.0 * y_phase) * arc_window(phi, log_r, 1.4, 1.3);
+        mod += 0.15 * sin(7.0 * (phi + t_phase) - 70.0 * log_r + 4.2 + 6.0 * y_phase) * arc_window(phi, log_r, 4.2, 1.4);
+
+        // Dense concentric ring structure (Saturn-like, many bands)
+        // Rings get arc-windowed too — not perfect circles
+        mod += 0.70 * streak(6.0 * r_ks + 0.3, 30.0) * arc_window(phi, log_r, 0.3, 0.3);
+        mod += 0.55 * streak(11.0 * r_ks + 1.7, 25.0) * arc_window(phi, log_r, 1.7, 0.4);
+        mod += 0.45 * streak(18.0 * r_ks + 4.1, 20.0) * arc_window(phi, log_r, 4.1, 0.5);
+        mod += 0.35 * streak(27.0 * r_ks + 2.9, 25.0) * arc_window(phi, log_r, 2.9, 0.6);
+        mod += 0.25 * streak(40.0 * r_ks + 0.6, 20.0) * arc_window(phi, log_r, 0.6, 0.7);
+
+        // Sharp dark concentric gaps / ring divisions (lightly windowed)
+        mod -= 0.70 * streak(2.0 * (phi + t_phase) - 14.0 * log_r + 1.4 + 2.0 * y_phase, 60.0) * arc_window(phi, log_r, 1.4, 0.3);
+        mod -= 0.55 * streak(3.0 * (phi + t_phase) - 20.0 * log_r + 3.8 + 1.5 * y_phase, 70.0) * arc_window(phi, log_r, 3.8, 0.35);
+        mod -= 0.45 * streak(3.0 * (phi + t_phase) - 28.0 * log_r + 0.5 + 2.5 * y_phase, 50.0) * arc_window(phi, log_r, 0.5, 0.4);
+        mod -= 0.35 * streak(4.0 * (phi + t_phase) - 38.0 * log_r + 2.7 + 1.8 * y_phase, 80.0) * arc_window(phi, log_r, 2.7, 0.45);
+
+        // Dense mottling / granularity (2D — radial-dominant)
+        mod += 0.40 * sin(5.0 * phi - 35.0 * log_r + 2.2) *
+               sin(6.0 * phi - 45.0 * log_r + 5.1);
+        mod += 0.30 * sin(8.0 * phi - 55.0 * log_r + 1.0) *
+               cos(10.0 * phi - 65.0 * log_r + 3.7);
+
+        // Caustic-like bright concentric filaments
+        mod += 0.50 * streak(2.0 * (phi + t_phase) - 12.0 * log_r + 2.0, 50.0) *
+               streak(15.0 * r_ks + 3.3, 30.0) * arc_window(phi, log_r, 2.0, 1.0);
+        mod += 0.35 * streak(2.0 * (phi + t_phase) - 18.0 * log_r + 4.5, 40.0) *
+               streak(21.0 * r_ks + 1.1, 25.0) * arc_window(phi, log_r, 4.5, 1.2);
+
+        // Turbulent "froth" — radial-dominant fine texture
+        const double froth1 = sin(6.0 * phi + 40.0 * log_r + 1.3 + t_phase * 2.0);
+        const double froth2 = sin(8.0 * phi - 55.0 * log_r + 4.6 + t_phase * 3.0);
+        mod += 0.35 * froth1 * froth2;
+
+        // ---- Edge streaks: azimuthally narrow, radially elongated bright
+        //      filaments at both inner and outer edges (Gargantua hallmark) ----
+        // Inner-edge plunging streaks: short fragmented arcs near ISCO
+        // High brevity (2.0-3.5) → arcs span only ~1/10th of orbit
+        const double inner_prox = exp(-4.0 * (r_norm - 0.0) * (r_norm - 0.0));
+        mod += 1.8 * inner_prox * streak(1.0 * (phi + t_phase * 1.5) - 6.0 * log_r + 0.7, 40.0) * arc_window(phi, log_r, 0.7, 2.5);
+        mod += 1.2 * inner_prox * streak(1.0 * (phi + t_phase * 1.3) - 10.0 * log_r + 2.9, 50.0) * arc_window(phi, log_r, 2.9, 3.0);
+        mod += 0.8 * inner_prox * streak(2.0 * (phi + t_phase * 1.1) - 15.0 * log_r + 4.4, 60.0) * arc_window(phi, log_r, 4.4, 3.5);
+        mod += 0.5 * inner_prox * streak(2.0 * (phi + t_phase * 0.9) - 20.0 * log_r + 1.2, 30.0) * arc_window(phi, log_r, 1.2, 2.0);
+
+        // Outer-edge trailing arcs: short fragments fading at disk edge
+        // High brevity (2.0-3.0) → scattered short arcs
+        const double outer_prox = exp(-4.0 * (r_norm - 1.0) * (r_norm - 1.0));
+        mod += 1.4 * outer_prox * streak(1.0 * (phi + t_phase) - 4.0 * log_r + 1.5, 30.0) * arc_window(phi, log_r, 1.5, 2.0);
+        mod += 1.0 * outer_prox * streak(1.0 * (phi + t_phase) - 7.0 * log_r + 3.8, 40.0) * arc_window(phi, log_r, 3.8, 2.5);
+        mod += 0.7 * outer_prox * streak(2.0 * (phi + t_phase) - 11.0 * log_r + 0.3, 50.0) * arc_window(phi, log_r, 0.3, 3.0);
+        mod += 0.4 * outer_prox * streak(2.0 * (phi + t_phase) - 16.0 * log_r + 5.6, 30.0) * arc_window(phi, log_r, 5.6, 2.5);
+
+        // Mid-radius bright arcs (gravitational lensing caustic lines)
+        // Moderate brevity (1.5) → medium-length arcs
+        const double mid_prox = exp(-6.0 * (r_norm - 0.3) * (r_norm - 0.3));
+        mod += 0.9 * mid_prox * streak(1.0 * (phi + t_phase) - 4.0 * log_r + 2.2, 60.0) * arc_window(phi, log_r, 2.2, 1.5);
+        mod += 0.6 * mid_prox * streak(1.0 * (phi + t_phase) - 7.0 * log_r + 0.8, 50.0) * arc_window(phi, log_r, 0.8, 1.8);
+    }
 
     // Radial envelope
-    const double envelope = 4.0 * r_norm * (1.0 - r_norm);
-    mod *= (0.4 + 0.6 * envelope);
+    if (pp.disk_flat_mode)
+    {
+        // Edge-preserving envelope: bright at inner edge (infalling),
+        // gentle taper at outer edge, never kills texture completely
+        const double inner_edge = dclamp((r_ks - tex_inner) / (0.15 * (tex_outer - tex_inner)), 0.0, 1.0);
+        const double outer_edge = dclamp((tex_outer - r_ks) / (0.25 * (tex_outer - tex_inner)), 0.0, 1.0);
+        const double edge_env = sqrt(inner_edge) * sqrt(outer_edge);
+        // Inner-edge brightening: streaks near ISCO glow hotter
+        const double inner_boost = 1.0 + 2.0 * exp(-8.0 * r_norm * r_norm);
+        mod *= (0.5 + 0.5 * edge_env) * inner_boost;
+    }
+    else
+    {
+        const double envelope = 4.0 * r_norm * (1.0 - r_norm);
+        mod *= (0.4 + 0.6 * envelope);
+    }
+
+    // Flat mode: wider dynamic range for deeper contrast
+    if (pp.disk_flat_mode)
+    {
+        const double factor = 0.20 + 0.80 * fmax(mod, 0.0);
+        return dclamp(factor, 0.01, 5.0);
+    }
 
     const double factor = 0.35 + 0.65 * fmax(mod, 0.0);
     return dclamp(factor, 0.02, 3.0);
@@ -323,26 +452,47 @@ BH_FUNC inline double disk_density(const dvec3 &pos, double r_ks,
 {
     const double inner_r = pp.disk_inner_r;
     const double outer_r = pp.disk_outer_r;
-    const double fade_limit = outer_r * 1.2;
-    if (r_ks < inner_r || r_ks > fade_limit)
+
+    // In flat mode: extend material inside ISCO and further beyond outer edge
+    const double dens_inner = pp.disk_flat_mode ? inner_r * 0.5 : inner_r;
+    const double fade_limit = pp.disk_flat_mode ? outer_r * 1.5 : outer_r * 1.2;
+
+    if (r_ks < dens_inner || r_ks > fade_limit)
         return 0.0;
     if (warped_h < 1e-12)
         return 0.0;
 
     const double height = pos.y;
-    const double radial = pow(inner_r / r_ks, 1.5);
+    const double radial = pow(dens_inner / r_ks, 1.5);
     const double vertical = exp(-0.5 * (height * height) / (warped_h * warped_h));
 
     double outer_fade = 1.0;
     if (r_ks > outer_r)
     {
-        const double fw = 0.1 * outer_r;
+        // In flat mode: wider outer fade so streaks trail off gradually
+        const double fw = pp.disk_flat_mode ? 0.2 * outer_r : 0.1 * outer_r;
         const double d = r_ks - outer_r;
         outer_fade = exp(-(d * d) / (2.0 * fw * fw));
     }
 
-    return pp.disk_density0 * radial * vertical *
-           disk_clump_factor(pos, r_ks, warped_h, pp) * outer_fade;
+    // Inner-edge plunging region: material inside ISCO falls inward with
+    // rapidly decreasing density — cubic falloff keeps it dim
+    double inner_fade = 1.0;
+    if (pp.disk_flat_mode && r_ks < inner_r)
+    {
+        const double t = (r_ks - dens_inner) / (inner_r - dens_inner);
+        inner_fade = t * t * t; // cubic ramp: drops off fast toward BH
+    }
+
+    // In flat mode: boost density significantly so the thin disk appears
+    // more opaque and solid.  The vertical Gaussian is much sharper (thin
+    // disk), so we compensate by increasing the coefficient.
+    double density_scale = 1.0;
+    if (pp.disk_flat_mode)
+        density_scale = 8.0;
+
+    return density_scale * pp.disk_density0 * radial * vertical *
+           disk_clump_factor(pos, r_ks, warped_h, pp) * outer_fade * inner_fade;
 }
 
 // Temperature: simplified Novikov-Thorne profile
@@ -350,9 +500,20 @@ BH_FUNC inline double disk_temperature(double r_ks, const PhysicsParams &pp)
 {
     const double inner_r = pp.disk_inner_r;
     const double outer_r = pp.disk_outer_r;
-    const double fade_limit = outer_r * 1.2;
-    if (r_ks < inner_r || r_ks > fade_limit)
+
+    // In flat mode: extend temperature profile inside ISCO and further past outer edge
+    const double temp_inner = pp.disk_flat_mode ? inner_r * 0.5 : inner_r;
+    const double fade_limit = pp.disk_flat_mode ? outer_r * 1.5 : outer_r * 1.2;
+    if (r_ks < temp_inner || r_ks > fade_limit)
         return 0.0;
+
+    // Inside ISCO (plunging region): temperature fades as material falls in.
+    // Use a lower peak (0.6 instead of 1.0) and cube the ramp for faster falloff.
+    if (pp.disk_flat_mode && r_ks < inner_r)
+    {
+        const double t = (r_ks - temp_inner) / (inner_r - temp_inner);
+        return 0.6 * t * t * t;
+    }
 
     const double x_ratio = r_ks / inner_r;
     const double factor = (1.0 / (x_ratio * x_ratio * x_ratio)) *
@@ -365,12 +526,89 @@ BH_FUNC inline double disk_temperature(double r_ks, const PhysicsParams &pp)
     double outer_fade = 1.0;
     if (r_ks > outer_r)
     {
-        const double fw = 0.1 * outer_r;
+        const double fw = pp.disk_flat_mode ? 0.2 * outer_r : 0.1 * outer_r;
         const double d = r_ks - outer_r;
         outer_fade = exp(-(d * d) / (2.0 * fw * fw));
     }
 
-    return fmax(pow(fmax(T4 * outer_fade, 0.0), 0.25), 0.0);
+    double T_base = fmax(pow(fmax(T4 * outer_fade, 0.0), 0.25), 0.0);
+    return T_base;
+}
+
+// Azimuthal temperature perturbation for flat mode — creates hot/cool streaks
+// that shift the blackbody color across the disk surface.
+// Returns a multiplier on temperature (centered around 1.0).
+BH_FUNC inline double disk_temperature_perturbation(const dvec3 &pos, double r_ks,
+                                                    const PhysicsParams &pp)
+{
+    if (!pp.disk_flat_mode)
+        return 1.0;
+
+    const double inner_r = pp.disk_inner_r;
+    const double outer_r = pp.disk_outer_r;
+    const double tex_inner = inner_r * 0.5;
+    const double tex_outer = outer_r * 1.4;
+    if (r_ks < tex_inner || r_ks > tex_outer)
+        return 1.0;
+
+    const double phi = atan2(pos.z, pos.x);
+    const double log_r = log(fmax(r_ks, 1e-6));
+    const double r_norm = dclamp((r_ks - tex_inner) / (tex_outer - tex_inner), 0.0, 1.0);
+
+    const double omega = 1.0 / (r_ks * sqrt(r_ks));
+    const double tp = pp.disk_time * omega;
+
+    auto streak = [](double phase, double sharpness) -> double
+    {
+        const double s = sin(phase);
+        return pow(s * s, sharpness);
+    };
+
+    auto arc_window = [](double phi, double log_r, double seed, double brevity) -> double
+    {
+        const double w1 = sin(1.0 * phi + 2.71 * log_r + seed);
+        const double w2 = sin(2.0 * phi - 4.33 * log_r + seed * 1.7 + 1.1);
+        const double w3 = sin(3.0 * phi + 7.19 * log_r + seed * 0.6 + 3.4);
+        return pow(fmax(w1 * w1 * w2 * w2 * w3 * w3, 1e-12), brevity);
+    };
+
+    // Large-scale concentric temperature arcs — subtle
+    double dT = 0.0;
+    dT += 0.10 * sin(1.0 * (phi + tp) - 4.0 * log_r + 0.5) * arc_window(phi, log_r, 7.1, 0.4);
+    dT += 0.08 * sin(1.0 * (phi + tp) - 6.0 * log_r + 2.1) * arc_window(phi, log_r, 8.3, 0.5);
+    dT += 0.06 * sin(1.0 * (phi + tp) - 8.0 * log_r + 0.7) * arc_window(phi, log_r, 9.7, 0.6);
+
+    // Medium-scale concentric temperature filaments
+    dT += 0.10 * sin(2.0 * (phi + tp) - 12.0 * log_r + 1.3) * arc_window(phi, log_r, 10.3, 0.7);
+    dT += 0.09 * sin(2.0 * (phi + tp) - 16.0 * log_r - 0.8) * arc_window(phi, log_r, 11.8, 0.8);
+    dT += 0.08 * sin(3.0 * (phi + tp) - 22.0 * log_r + 3.7) * arc_window(phi, log_r, 12.7, 0.9);
+
+    // Fine-scale: rich micro-turbulence temperature jitter (concentric)
+    dT += 0.10 * sin(3.0 * (phi + tp) - 30.0 * log_r + 1.1) * arc_window(phi, log_r, 13.1, 1.0);
+    dT += 0.09 * sin(4.0 * phi - 40.0 * log_r + 2.2) * arc_window(phi, log_r, 14.2, 1.1);
+    dT += 0.08 * sin(5.0 * (phi + tp) - 50.0 * log_r + 3.5) * arc_window(phi, log_r, 15.5, 1.2);
+    dT += 0.07 * sin(6.0 * phi - 60.0 * log_r + 0.9) * arc_window(phi, log_r, 16.9, 1.3);
+    dT += 0.06 * sin(7.0 * (phi + tp) - 70.0 * log_r + 4.8) * arc_window(phi, log_r, 17.8, 1.4);
+    dT += 0.05 * sin(8.0 * phi - 80.0 * log_r + 2.6) * arc_window(phi, log_r, 18.6, 1.5);
+    // 2D micro-mottling (product terms — radial-dominant)
+    dT += 0.08 * sin(5.0 * phi + 30.0 * log_r + 1.7 + tp * 2.0) *
+          sin(7.0 * phi - 40.0 * log_r + 4.2 + tp * 1.5);
+    dT += 0.06 * sin(8.0 * phi - 50.0 * log_r + 0.3 + tp * 3.0) *
+          cos(10.0 * phi + 60.0 * log_r + 3.1 + tp * 2.5);
+
+    // Edge-specific: short hot arc fragments near inner edge
+    const double inner_prox = exp(-5.0 * r_norm * r_norm);
+    dT += 0.12 * inner_prox * streak(1.0 * (phi + tp * 1.5) - 6.0 * log_r + 0.7, 30.0) * arc_window(phi, log_r, 19.7, 2.5);
+    dT += 0.10 * inner_prox * streak(1.0 * (phi + tp * 1.3) - 10.0 * log_r + 2.9, 40.0) * arc_window(phi, log_r, 20.9, 3.0);
+    dT -= 0.08 * inner_prox * streak(2.0 * (phi + tp * 1.1) - 14.0 * log_r + 4.4, 50.0) * arc_window(phi, log_r, 21.4, 3.5);
+
+    // Outer edge: short cool concentric trailing arc fragments
+    const double outer_prox = exp(-5.0 * (r_norm - 1.0) * (r_norm - 1.0));
+    dT -= 0.10 * outer_prox * (0.5 + 0.5 * sin(1.0 * (phi + tp) - 4.0 * log_r + 1.5)) * arc_window(phi, log_r, 22.5, 2.0);
+    dT += 0.12 * outer_prox * streak(1.0 * (phi + tp) - 7.0 * log_r + 3.8, 50.0) * arc_window(phi, log_r, 23.8, 2.5);
+
+    // Clamp perturbation: temperature swings ±25%
+    return dclamp(1.0 + dT, 0.75, 1.25);
 }
 
 // Blackbody temperature to RGB (5-zone piecewise)
@@ -428,7 +666,9 @@ BH_FUNC inline dvec3 disk_emissivity(const dvec3 &pos, double r_ks,
     if (rho < 1e-12)
         return dvec3(0, 0, 0);
 
-    const double T = disk_temperature(r_ks, pp);
+    // Apply azimuthal temperature perturbation (flat mode: hot/cool streaks)
+    const double T_perturb = disk_temperature_perturbation(pos, r_ks, pp);
+    const double T = disk_temperature(r_ks, pp) * T_perturb;
     if (T < 1e-12)
         return dvec3(0, 0, 0);
 
@@ -445,11 +685,11 @@ BH_FUNC inline dvec3 disk_emissivity(const dvec3 &pos, double r_ks,
         const double log_r = log(fmax(r_ks, 1e-6));
         const double r_norm = dclamp((r_ks - inner_r) / (outer_r - inner_r), 0.0, 1.0);
 
-        const double hue = 0.6 * sin(2.0 * phi - 4.5 * log_r + 0.5) +
-                           0.4 * sin(3.0 * phi - 7.0 * log_r + 2.1) +
-                           0.3 * cos(5.0 * phi - 10.0 * log_r + 1.7);
-        const double hue2 = 0.5 * sin(4.0 * phi - 6.0 * log_r + 3.3) +
-                            0.3 * cos(7.0 * phi - 12.0 * log_r + 0.9);
+        const double hue = 0.6 * sin(1.0 * phi - 4.0 * log_r + 0.5) +
+                           0.4 * sin(1.0 * phi - 6.0 * log_r + 2.1) +
+                           0.3 * cos(1.0 * phi - 8.0 * log_r + 1.7);
+        const double hue2 = 0.5 * sin(1.0 * phi - 5.0 * log_r + 3.3) +
+                            0.3 * cos(1.0 * phi - 9.0 * log_r + 0.9);
 
         const double radial_hue = 1.0 - 2.0 * r_norm;
         const double mat = 0.5 + 0.5 * hue2;
@@ -472,6 +712,79 @@ BH_FUNC inline dvec3 disk_emissivity(const dvec3 &pos, double r_ks,
         dg += cv * 0.06 * mat;
         db -= cv * 0.12 * mat;
 
+        // ---- Flat mode: strong edge-specific color streaks ----
+        if (pp.disk_flat_mode)
+        {
+            const double omega = 1.0 / (r_ks * sqrt(r_ks));
+            const double tp = pp.disk_time * omega;
+
+            auto streak_fn = [](double phase, double sharpness) -> double
+            {
+                const double s = sin(phase);
+                return pow(s * s, sharpness);
+            };
+
+            auto arc_win = [](double phi, double log_r, double seed, double brevity) -> double
+            {
+                const double w1 = sin(1.0 * phi + 2.71 * log_r + seed);
+                const double w2 = sin(2.0 * phi - 4.33 * log_r + seed * 1.7 + 1.1);
+                const double w3 = sin(3.0 * phi + 7.19 * log_r + seed * 0.6 + 3.4);
+                return pow(fmax(w1 * w1 * w2 * w2 * w3 * w3, 1e-12), brevity);
+            };
+
+            // Extended radial range for edge color
+            const double tex_inner = inner_r * 0.5;
+            const double tex_outer = outer_r * 1.4;
+            const double r_ext = dclamp((r_ks - tex_inner) / (tex_outer - tex_inner), 0.0, 1.0);
+
+            // Subtle large-scale concentric hue variation (arc-windowed)
+            const double hue3 = sin(1.0 * (phi + tp) - 6.0 * log_r + 1.7) * arc_win(phi, log_r, 30.1, 0.5);
+            const double hue4 = sin(1.0 * (phi + tp) - 10.0 * log_r + 3.2) * arc_win(phi, log_r, 31.2, 0.6);
+
+            dr += cv * 0.12 * hue3;
+            dg += cv * 0.08 * hue4;
+
+            // Rich micro-turbulence color jitter — arc-windowed
+            dr += cv * 0.10 * sin(2.0 * (phi + tp) - 16.0 * log_r + 0.4) * arc_win(phi, log_r, 32.4, 0.8);
+            dg += cv * 0.09 * sin(3.0 * (phi + tp) - 22.0 * log_r + 5.1) * arc_win(phi, log_r, 33.1, 0.9);
+            dr += cv * 0.08 * sin(3.0 * (phi + tp) - 28.0 * log_r + 2.8) * arc_win(phi, log_r, 34.8, 1.0);
+            dg += cv * 0.08 * sin(4.0 * (phi + tp) - 34.0 * log_r + 1.3) * arc_win(phi, log_r, 35.3, 1.0);
+            db += cv * 0.06 * sin(2.0 * (phi + tp) - 18.0 * log_r + 4.3) * arc_win(phi, log_r, 36.3, 1.1);
+            dr -= cv * 0.07 * sin(4.0 * (phi + tp) - 40.0 * log_r + 3.9) * arc_win(phi, log_r, 37.9, 1.1);
+            dg += cv * 0.07 * sin(5.0 * (phi + tp) - 50.0 * log_r + 0.7) * arc_win(phi, log_r, 38.7, 1.2);
+            db += cv * 0.05 * sin(6.0 * (phi + tp) - 55.0 * log_r + 2.4) * arc_win(phi, log_r, 39.4, 1.3);
+            dr += cv * 0.06 * sin(6.0 * phi - 60.0 * log_r + 5.5) * arc_win(phi, log_r, 40.5, 1.3);
+            dg -= cv * 0.06 * sin(7.0 * phi - 70.0 * log_r + 1.1) * arc_win(phi, log_r, 41.1, 1.4);
+            db += cv * 0.05 * sin(8.0 * phi - 80.0 * log_r + 3.2) * arc_win(phi, log_r, 42.2, 1.4);
+            dr += cv * 0.05 * sin(9.0 * phi - 90.0 * log_r + 0.8) * arc_win(phi, log_r, 43.8, 1.5);
+
+            // 2D micro-mottling: product terms — radial-dominant
+            dr += cv * 0.08 * sin(5.0 * phi + 30.0 * log_r + 1.7 + tp * 2.0) *
+                  sin(6.0 * phi - 40.0 * log_r + 4.2 + tp * 1.5);
+            dg += cv * 0.07 * sin(5.0 * phi - 35.0 * log_r + 0.3 + tp * 3.0) *
+                  cos(7.0 * phi + 45.0 * log_r + 3.1 + tp * 2.5);
+            db += cv * 0.05 * sin(8.0 * phi + 50.0 * log_r + 2.9 + tp * 1.8) *
+                  sin(9.0 * phi - 60.0 * log_r + 5.3 + tp * 2.2);
+
+            // Inner-edge color: short arc fragments (high brevity)
+            const double inner_prox = exp(-5.0 * r_ext * r_ext);
+            const double inner_streak = streak_fn(1.0 * (phi + tp * 1.5) - 6.0 * log_r + 0.7, 30.0) * arc_win(phi, log_r, 44.7, 2.5);
+            dg += cv * 0.18 * inner_prox * inner_streak;
+            db += cv * 0.08 * inner_prox * inner_streak;
+
+            // Outer-edge color: short arc fragments toward deeper red
+            const double outer_prox = exp(-5.0 * (r_ext - 1.0) * (r_ext - 1.0));
+            const double outer_streak = streak_fn(1.0 * (phi + tp) - 4.0 * log_r + 1.5, 30.0) * arc_win(phi, log_r, 45.5, 2.0);
+            dr += cv * 0.15 * outer_prox * outer_streak;
+            dg -= cv * 0.10 * outer_prox * (1.0 - outer_streak);
+
+            // Subtle hot-spot accents (medium arc length)
+            const double knot = streak_fn(1.0 * (phi + tp) - 4.0 * log_r + 2.2, 60.0) * arc_win(phi, log_r, 46.2, 1.5);
+            const double mid_prox = exp(-6.0 * (r_ext - 0.3) * (r_ext - 0.3));
+            dg += cv * 0.15 * mid_prox * knot;
+            db += cv * 0.07 * mid_prox * knot;
+        }
+
         color.x = dclamp(color.x + dr, 0.0, 1.0);
         color.y = dclamp(color.y + dg, 0.0, 1.0);
         color.z = dclamp(color.z + db, 0.0, 1.0);
@@ -489,13 +802,9 @@ BH_FUNC inline dvec4 disk_gas_four_velocity(const dvec3 &pos, double r_ks,
                                             const PhysicsParams &pp)
 {
     const double inner_r = pp.disk_inner_r;
-    if (r_ks < inner_r)
-        return dvec4(-1, 0, 0, 0);
-
     const double a = pp.bh_spin;
     const double M = pp.bh_mass;
     const double sqrtM = sqrt(M);
-    const double Omega = sqrtM / (r_ks * sqrt(r_ks) + a * sqrtM);
 
     const double r_cyl = sqrt(pos.x * pos.x + pos.z * pos.z);
     if (r_cyl < 1e-12)
@@ -503,6 +812,47 @@ BH_FUNC inline dvec4 disk_gas_four_velocity(const dvec3 &pos, double r_ks,
 
     const double cos_phi = pos.x / r_cyl;
     const double sin_phi = pos.z / r_cyl;
+
+    // Inside ISCO (plunging region): gas falls inward with increasing
+    // radial velocity while conserving angular momentum from the ISCO.
+    // This produces a strong redshift that dims the inner emission.
+    if (pp.disk_flat_mode && r_ks < inner_r)
+    {
+        // Angular velocity: conserve ISCO angular momentum L = Omega_isco * r_isco^2
+        const double Omega_isco = sqrtM / (inner_r * sqrt(inner_r) + a * sqrtM);
+        const double L_isco = Omega_isco * inner_r * inner_r;
+        const double Omega_plunge = L_isco / (r_ks * r_ks);
+
+        // Radial infall velocity: approximate free-fall from ISCO
+        // v_r ~ -sqrt(2M * (1/r - 1/r_isco)) (Newtonian approximation)
+        const double v_r_mag = sqrt(fmax(2.0 * M * (1.0 / r_ks - 1.0 / inner_r), 0.0));
+
+        // Spatial velocity in Cartesian coords (inward radial + orbital)
+        const double vx = -cos_phi * v_r_mag - sin_phi * Omega_plunge * r_cyl;
+        const double vy = 0.0;
+        const double vz = -sin_phi * v_r_mag + cos_phi * Omega_plunge * r_cyl;
+
+        // Solve for u^0
+        const double twoH = 2.0 * H;
+        const double g00 = -1.0 + twoH;
+        const double lv = lx * vx + ly * vy + lz * vz;
+        const double b = 2.0 * twoH * lv;
+        const double v_sq = vx * vx + vy * vy + vz * vz;
+        const double c = v_sq + twoH * lv * lv + 1.0;
+        const double disc = b * b - 4.0 * g00 * c;
+        const double sqrt_disc = sqrt(fmax(disc, 0.0));
+        const double inv_2g00 = 0.5 / g00;
+        const double u0a = (-b + sqrt_disc) * inv_2g00;
+        const double u0b = (-b - sqrt_disc) * inv_2g00;
+        const double u0 = (u0a < 0.0) ? u0a : u0b;
+
+        return dvec4(u0, vx, vy, vz);
+    }
+
+    if (r_ks < inner_r)
+        return dvec4(-1, 0, 0, 0);
+
+    const double Omega = sqrtM / (r_ks * sqrt(r_ks) + a * sqrtM);
     const double vx = -sin_phi * Omega * r_cyl;
     const double vy = 0.0;
     const double vz = cos_phi * Omega * r_cyl;
@@ -531,12 +881,12 @@ BH_FUNC inline dvec4 disk_gas_four_velocity(const dvec3 &pos, double r_ks,
 
 // Initialize ray position and velocity from camera parameters
 BH_FUNC inline void init_ray(dvec3 &pos, dvec3 &vel,
-                              const dvec3 &cam_pos,
-                              const dvec3 &cam_right,
-                              const dvec3 &cam_up,
-                              const dvec3 &cam_fwd,
-                              double sub_x, double sub_y,
-                              double fov_x, double fov_y)
+                             const dvec3 &cam_pos,
+                             const dvec3 &cam_right,
+                             const dvec3 &cam_up,
+                             const dvec3 &cam_fwd,
+                             double sub_x, double sub_y,
+                             double fov_x, double fov_y)
 {
     pos = cam_pos;
     const double x_rad = ((sub_x - 0.5) * fov_x) * (M_PI / 180.0);
@@ -625,9 +975,10 @@ BH_FUNC inline void sample_disk_volume(const dvec3 &pos, const dvec3 &vel, doubl
     if (acc_opacity >= 0.999)
         return;
 
-    // Contains check
-    const double fade_limit = pp.disk_outer_r * 1.2;
-    if (r_ks < pp.disk_inner_r || r_ks > fade_limit)
+    // Contains check — wider bounds in flat mode for edge streaks
+    const double samp_inner = pp.disk_flat_mode ? pp.disk_inner_r * 0.5 : pp.disk_inner_r;
+    const double fade_limit = pp.disk_flat_mode ? pp.disk_outer_r * 1.5 : pp.disk_outer_r * 1.2;
+    if (r_ks < samp_inner || r_ks > fade_limit)
         return;
 
     const double warped_h = disk_warped_half_thickness(pos, r_ks, pp);
@@ -715,7 +1066,8 @@ inline PhysicsParams make_physics_params(double M, double a,
                                          double disk_outer_r, double disk_thickness,
                                          double disk_density, double disk_opacity,
                                          double emission_boost, double color_variation,
-                                         double turbulence, double time)
+                                         double turbulence, double time,
+                                         int flat_mode = 0)
 {
     PhysicsParams pp = {};
     pp.bh_mass = M;
@@ -731,6 +1083,7 @@ inline PhysicsParams make_physics_params(double M, double a,
     pp.disk_color_variation = color_variation;
     pp.disk_turbulence = turbulence;
     pp.disk_time = time;
+    pp.disk_flat_mode = flat_mode;
     return pp;
 }
 
