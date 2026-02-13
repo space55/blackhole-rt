@@ -13,6 +13,8 @@ struct scene_config_s
     int output_height = 512;
     std::string output_file = "output.tga";
     std::string hdr_output = ""; // empty = disabled; set to e.g. "output.hdr" to write Radiance HDR
+    std::string exr_output = ""; // empty = disabled; set to e.g. "output.exr" to write OpenEXR
+    std::string jpg_output = ""; // empty = disabled; set to e.g. "output.jpg" to write JPEG thumbnail
 
     // Sky map
     std::string sky_image = "hubble-skymap.jpg";

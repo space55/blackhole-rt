@@ -13,6 +13,13 @@
 
 #include "stb_image_write.h"
 
+#ifdef HAS_OPENEXR
+#include <OpenEXR/ImfOutputFile.h>
+#include <OpenEXR/ImfChannelList.h>
+#include <OpenEXR/ImfHeader.h>
+#include <OpenEXR/ImfFrameBuffer.h>
+#endif
+
 #ifdef USE_GPU
 #include "gpu_render.h"
 #endif
@@ -82,6 +89,7 @@ int main(int argc, char *argv[])
     const size_t num_pixels = static_cast<size_t>(out_width) * static_cast<size_t>(out_height);
     std::vector<dvec3> hdr_disk(num_pixels);
     std::vector<dvec3> hdr_sky(num_pixels);
+    std::vector<double> hdr_alpha(num_pixels, 0.0); // disk opacity (0 = transparent, 1 = opaque/BH)
     std::vector<BH_COLOR_CHANNEL_TYPE> pixels(num_pixels * 3);
 
     const int total_pixels = out_width * out_height;
@@ -140,6 +148,7 @@ int main(int argc, char *argv[])
             hdr_disk[i] = dvec3(gpu_results[i].disk_r,
                                 gpu_results[i].disk_g,
                                 gpu_results[i].disk_b);
+            hdr_alpha[i] = 1.0 - (double)gpu_results[i].sky_weight;
 
             if (gpu_results[i].sky_weight > 1e-6f)
             {
@@ -150,7 +159,7 @@ int main(int argc, char *argv[])
                 {
                     dvec3 sky_color = sample_sky(*image, exit_dir, sky_rot,
                                                  cfg.sky_offset_u, cfg.sky_offset_v);
-                    hdr_sky[i] = sky_color * cfg.sky_brightness *
+                    hdr_sky[i] = sky_color *
                                  (double)gpu_results[i].sky_weight;
                 }
             }
@@ -168,6 +177,7 @@ int main(int argc, char *argv[])
             const int idx = y * out_width + x;
             dvec3 pixel_color;
             dvec3 pixel_sky;
+            double pixel_alpha = 0.0;
 
             for (int sy = 0; sy < aa_grid; ++sy)
             {
@@ -246,15 +256,16 @@ int main(int argc, char *argv[])
                     if (hit_black_hole)
                     {
                         pixel_color += acc_color;
+                        pixel_alpha += 1.0; // fully opaque (disk or black hole)
                     }
                     else
                     {
                         dvec3 sky_color = sample_sky(*image, vel, sky_rot,
-                                                     cfg.sky_offset_u, cfg.sky_offset_v) *
-                                          cfg.sky_brightness;
+                                                     cfg.sky_offset_u, cfg.sky_offset_v);
                         double transmittance = 1.0 - acc_opacity;
                         pixel_color += acc_color;
                         pixel_sky += transmittance * sky_color;
+                        pixel_alpha += acc_opacity;
                     }
 
                 } // sx
@@ -263,8 +274,10 @@ int main(int argc, char *argv[])
             // Average all samples and store in HDR buffers
             pixel_color *= inv_spp;
             pixel_sky *= inv_spp;
+            pixel_alpha *= inv_spp;
             hdr_disk[idx] = pixel_color;
             hdr_sky[idx] = pixel_sky;
+            hdr_alpha[idx] = pixel_alpha;
 
             int done = pixels_done.fetch_add(1, std::memory_order_relaxed) + 1;
             if (done % out_width == 0)
@@ -440,7 +453,7 @@ int main(int argc, char *argv[])
 #pragma omp parallel for
         for (int i = 0; i < (int)num_pixels; ++i)
         {
-            dvec3 combined = hdr_disk[i] + hdr_sky[i];
+            dvec3 combined = hdr_disk[i] + hdr_sky[i] * cfg.sky_brightness;
             hdr_float[i * 3 + 0] = static_cast<float>(combined.x);
             hdr_float[i * 3 + 1] = static_cast<float>(combined.y);
             hdr_float[i * 3 + 2] = static_cast<float>(combined.z);
@@ -452,13 +465,107 @@ int main(int argc, char *argv[])
     }
 
     // =====================================================================
+    // Write optional OpenEXR output (float32, multi-layer, ZIP compressed)
+    // =====================================================================
+#ifdef HAS_OPENEXR
+    if (!cfg.exr_output.empty())
+    {
+        try
+        {
+            Imf::Header header(out_width, out_height);
+            header.compression() = Imf::ZIP_COMPRESSION;
+
+            // Combined RGB (disk + sky) — the "beauty pass"
+            header.channels().insert("R", Imf::Channel(Imf::FLOAT));
+            header.channels().insert("G", Imf::Channel(Imf::FLOAT));
+            header.channels().insert("B", Imf::Channel(Imf::FLOAT));
+            header.channels().insert("A", Imf::Channel(Imf::FLOAT));
+
+            // Separate disk emission layer (with its own alpha)
+            header.channels().insert("disk.R", Imf::Channel(Imf::FLOAT));
+            header.channels().insert("disk.G", Imf::Channel(Imf::FLOAT));
+            header.channels().insert("disk.B", Imf::Channel(Imf::FLOAT));
+            header.channels().insert("disk.A", Imf::Channel(Imf::FLOAT));
+
+            // Separate sky layer (brightness-scaled)
+            header.channels().insert("sky.R", Imf::Channel(Imf::FLOAT));
+            header.channels().insert("sky.G", Imf::Channel(Imf::FLOAT));
+            header.channels().insert("sky.B", Imf::Channel(Imf::FLOAT));
+
+            // Build float32 scanline buffers
+            std::vector<float> exr_r(num_pixels), exr_g(num_pixels), exr_b(num_pixels);
+            std::vector<float> exr_a(num_pixels);
+            std::vector<float> exr_disk_r(num_pixels), exr_disk_g(num_pixels), exr_disk_b(num_pixels);
+            std::vector<float> exr_disk_a(num_pixels);
+            std::vector<float> exr_sky_r(num_pixels), exr_sky_g(num_pixels), exr_sky_b(num_pixels);
+
+#pragma omp parallel for
+            for (int i = 0; i < (int)num_pixels; ++i)
+            {
+                dvec3 sky_scaled = hdr_sky[i] * cfg.sky_brightness;
+                dvec3 combined = hdr_disk[i] + sky_scaled;
+
+                exr_r[i] = static_cast<float>(combined.x);
+                exr_g[i] = static_cast<float>(combined.y);
+                exr_b[i] = static_cast<float>(combined.z);
+                exr_a[i] = 1.0f; // beauty pass is fully composited — always opaque
+
+                exr_disk_r[i] = static_cast<float>(hdr_disk[i].x);
+                exr_disk_g[i] = static_cast<float>(hdr_disk[i].y);
+                exr_disk_b[i] = static_cast<float>(hdr_disk[i].z);
+                exr_disk_a[i] = static_cast<float>(hdr_alpha[i]);
+
+                exr_sky_r[i] = static_cast<float>(sky_scaled.x);
+                exr_sky_g[i] = static_cast<float>(sky_scaled.y);
+                exr_sky_b[i] = static_cast<float>(sky_scaled.z);
+            }
+
+            const size_t stride = sizeof(float);
+            const size_t scanline = sizeof(float) * out_width;
+
+            Imf::FrameBuffer fb;
+            fb.insert("R", Imf::Slice(Imf::FLOAT, (char *)exr_r.data(), stride, scanline));
+            fb.insert("G", Imf::Slice(Imf::FLOAT, (char *)exr_g.data(), stride, scanline));
+            fb.insert("B", Imf::Slice(Imf::FLOAT, (char *)exr_b.data(), stride, scanline));
+            fb.insert("A", Imf::Slice(Imf::FLOAT, (char *)exr_a.data(), stride, scanline));
+
+            fb.insert("disk.R", Imf::Slice(Imf::FLOAT, (char *)exr_disk_r.data(), stride, scanline));
+            fb.insert("disk.G", Imf::Slice(Imf::FLOAT, (char *)exr_disk_g.data(), stride, scanline));
+            fb.insert("disk.B", Imf::Slice(Imf::FLOAT, (char *)exr_disk_b.data(), stride, scanline));
+            fb.insert("disk.A", Imf::Slice(Imf::FLOAT, (char *)exr_disk_a.data(), stride, scanline));
+
+            fb.insert("sky.R", Imf::Slice(Imf::FLOAT, (char *)exr_sky_r.data(), stride, scanline));
+            fb.insert("sky.G", Imf::Slice(Imf::FLOAT, (char *)exr_sky_g.data(), stride, scanline));
+            fb.insert("sky.B", Imf::Slice(Imf::FLOAT, (char *)exr_sky_b.data(), stride, scanline));
+
+            Imf::OutputFile file(cfg.exr_output.c_str(), header);
+            file.setFrameBuffer(fb);
+            file.writePixels(out_height);
+
+            printf("Wrote EXR: %s\n", cfg.exr_output.c_str());
+        }
+        catch (const std::exception &e)
+        {
+            printf("ERROR: failed to write EXR: %s (%s)\n",
+                   cfg.exr_output.c_str(), e.what());
+        }
+    }
+#else
+    if (!cfg.exr_output.empty())
+    {
+        printf("WARNING: EXR output requested but OpenEXR was not found at build time.\n");
+        printf("         Install OpenEXR (brew install openexr) and reconfigure with cmake.\n");
+    }
+#endif
+
+    // =====================================================================
     // Tone mapping + quantization
     // =====================================================================
     printf("Tone mapping and writing output...\n");
 #pragma omp parallel for
     for (int i = 0; i < (int)num_pixels; ++i)
     {
-        dvec3 color = tonemap_disk(hdr_disk[i]) + hdr_sky[i];
+        dvec3 color = tonemap_disk(hdr_disk[i]) + hdr_sky[i] * cfg.sky_brightness;
         color = color.cwiseMax(0.0).cwiseMin(1.0);
         pixels[i * 3 + 0] = static_cast<BH_COLOR_CHANNEL_TYPE>(color.x * 255);
         pixels[i * 3 + 1] = static_cast<BH_COLOR_CHANNEL_TYPE>(color.y * 255);
@@ -469,19 +576,12 @@ int main(int argc, char *argv[])
     printf("Wrote %s\n", cfg.output_file.c_str());
 
     // Write JPEG thumbnail
+    if (!cfg.jpg_output.empty())
     {
-        std::string jpg_path = cfg.output_file;
-        // Replace extension with .jpg (or append if no dot found)
-        size_t dot_pos = jpg_path.rfind('.');
-        if (dot_pos != std::string::npos)
-            jpg_path = jpg_path.substr(0, dot_pos) + ".jpg";
+        if (stbi_write_jpg(cfg.jpg_output.c_str(), out_width, out_height, 3, pixels.data(), 90))
+            printf("Wrote JPEG thumbnail: %s\n", cfg.jpg_output.c_str());
         else
-            jpg_path += ".jpg";
-
-        if (stbi_write_jpg(jpg_path.c_str(), out_width, out_height, 3, pixels.data(), 90))
-            printf("Wrote JPEG thumbnail: %s\n", jpg_path.c_str());
-        else
-            printf("ERROR: failed to write JPEG thumbnail: %s\n", jpg_path.c_str());
+            printf("ERROR: failed to write JPEG thumbnail: %s\n", cfg.jpg_output.c_str());
     }
 
     return 0;

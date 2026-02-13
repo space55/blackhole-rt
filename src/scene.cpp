@@ -78,6 +78,8 @@ bool load_scene_config(const char *path, scene_config_s &cfg)
     get_int("output_height", cfg.output_height);
     get_string("output_file", cfg.output_file);
     get_string("hdr_output", cfg.hdr_output);
+    get_string("exr_output", cfg.exr_output);
+    get_string("jpg_output", cfg.jpg_output);
 
     // Sky
     get_string("sky_image", cfg.sky_image);
@@ -147,6 +149,10 @@ void print_scene_config(const scene_config_s &cfg)
     printf("  Output:    %d x %d  ->  %s\n", cfg.output_width, cfg.output_height, cfg.output_file.c_str());
     if (!cfg.hdr_output.empty())
         printf("  HDR out:   %s\n", cfg.hdr_output.c_str());
+    if (!cfg.exr_output.empty())
+        printf("  EXR out:   %s\n", cfg.exr_output.c_str());
+    if (!cfg.jpg_output.empty())
+        printf("  JPG out:   %s\n", cfg.jpg_output.c_str());
     printf("  Sky image: %s  brightness=%.2f  rot=(%.1f, %.1f, %.1f)  offset=(%.2f, %.2f)\n",
            cfg.sky_image.c_str(), cfg.sky_brightness,
            cfg.sky_pitch, cfg.sky_yaw, cfg.sky_roll,

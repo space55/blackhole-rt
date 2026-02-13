@@ -13,6 +13,10 @@ output_file     = output.tga    # output filename
 hdr_output      = output.hdr    # HDR output (Radiance .hdr); empty = disabled
                                 # Set to e.g. output.hdr to export raw linear HDR
                                 # for grading / bloom / exposure in external apps
+exr_output      = output.exr    # OpenEXR output (half-float, ZIP compressed);
+                                # empty = disabled.  Full HDR, widely supported
+                                # in DaVinci Resolve, Nuke, After Effects, etc.
+jpg_output      = output.jpg    # JPEG thumbnail; empty = disabled
 
 # --- Sky map ----------------------------------------------------------------
 sky_image       = hubble-skymap.jpg

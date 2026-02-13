@@ -29,6 +29,12 @@ if(ipo_supported)
 endif()
 
 find_package(OpenMP)
+find_package(OpenEXR 3 QUIET)
+if(OpenEXR_FOUND)
+    message(STATUS "Found OpenEXR: ${OpenEXR_VERSION}")
+else()
+    message(STATUS "OpenEXR not found — EXR output will be disabled")
+endif()
 
 if (CMAKE_BUILD_TYPE MATCHES Debug)
     message("Building Debug build")
@@ -66,4 +72,9 @@ endif()
 
 if(OpenMP_CXX_FOUND)
     target_link_libraries(${PROJECT_NAME} OpenMP::OpenMP_CXX)
+endif()
+
+if(OpenEXR_FOUND)
+    target_compile_definitions(${PROJECT_NAME} PRIVATE HAS_OPENEXR)
+    target_link_libraries(${PROJECT_NAME} OpenEXR::OpenEXR)
 endif()
