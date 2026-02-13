@@ -123,6 +123,7 @@ bool load_scene_config(const char *path, scene_config_s &cfg)
 
     // Tone mapping
     get_double("tonemap_compression", cfg.tonemap_compression);
+    get_double("exposure", cfg.exposure);
 
     // Anti-aliasing
     get_int("aa_samples", cfg.aa_samples);
@@ -168,7 +169,7 @@ void print_scene_config(const scene_config_s &cfg)
            cfg.disk_outer_r, cfg.disk_thickness, cfg.disk_density, cfg.disk_opacity);
     printf("  Disk look: emission_boost=%.1f  color_variation=%.2f  turbulence=%.2f  flat_mode=%d\n",
            cfg.disk_emission_boost, cfg.disk_color_variation, cfg.disk_turbulence, cfg.disk_flat_mode);
-    printf("  Tonemap:   compression=%.2f\n", cfg.tonemap_compression);
+    printf("  Tonemap:   compression=%.2f  exposure=%.2f\n", cfg.tonemap_compression, cfg.exposure);
     printf("  AA:        %dx%d = %d samples/pixel\n", cfg.aa_samples, cfg.aa_samples, cfg.aa_samples * cfg.aa_samples);
     printf("  Bloom:     strength=%.2f  threshold=%.2f  radius=%.3f\n",
            cfg.bloom_strength, cfg.bloom_threshold, cfg.bloom_radius);

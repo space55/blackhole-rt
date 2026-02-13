@@ -70,6 +70,11 @@ disk_flat_mode        = 1
 #   1.0 = heavy compression (Interstellar / movie look)
 tonemap_compression   = 1.0
 
+# Output exposure multiplier applied after tone mapping.
+#   1.0 = neutral,  2.0+ = blown-out brights with lifted shadows
+#   Disk regions above 1.0 clip to white in TGA/JPG (the "Interstellar" look).
+exposure              = 1.0
+
 # --- Anti-aliasing ----------------------------------------------------------
 # NxN stratified supersampling grid per pixel.
 #   1 = off (fastest), 2 = 4 samples, 3 = 9 samples, 4 = 16 samples

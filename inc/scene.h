@@ -60,6 +60,7 @@ struct scene_config_s
 
     // Tone mapping
     double tonemap_compression = 1.0;
+    double exposure = 1.0; // output exposure multiplier (>1 blows out brights, lifts shadows)
 
     // Anti-aliasing
     int aa_samples = 1; // NxN supersampling grid per pixel (1=off, 2=4spp, 3=9spp, 4=16spp)
