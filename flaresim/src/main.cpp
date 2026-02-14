@@ -51,6 +51,7 @@ struct Params
     float exposure = 1.0f;      // exposure multiplier for TGA
     float tonemap = 1.0f;       // tonemap compression for TGA
     float flare_gain = 1000.0f; // ghost intensity multiplier (default high for visibility)
+    float sky_brightness = 1.0f; // sky layer multiplier (requires sky.R/G/B layers in EXR)
     std::string tga_file;       // optional TGA output path
     std::string debug_tga;      // optional debug TGA: only bright pixels above threshold
 };
@@ -68,6 +69,7 @@ static void print_usage(const char *prog)
     printf("  --min-ghost <f>       Ghost pair pre-filter threshold (default: 1e-7)\n");
     printf("  --downsample <n>      Downsample bright pixels by factor (default: 4)\n");
     printf("  --flare-gain <f>      Ghost intensity multiplier (default: 1000)\n");
+    printf("  --sky-brightness <f>  Scale sky background brightness (default: 1.0)\n");
     printf("  --tga <file>          Also write composited TGA (beauty + flare, tonemapped)\n");
     printf("  --exposure <f>        Exposure multiplier for TGA output (default: 1.0)\n");
     printf("  --tonemap <f>         Tonemap compression for TGA output (default: 1.0)\n");
@@ -101,6 +103,8 @@ static bool parse_args(int argc, char *argv[], Params &p)
             p.downsample = std::max(1, atoi(argv[++i]));
         else if (!strcmp(argv[i], "--flare-gain") && i + 1 < argc)
             p.flare_gain = (float)atof(argv[++i]);
+        else if (!strcmp(argv[i], "--sky-brightness") && i + 1 < argc)
+            p.sky_brightness = (float)atof(argv[++i]);
         else if (!strcmp(argv[i], "--tga") && i + 1 < argc)
             p.tga_file = argv[++i];
         else if (!strcmp(argv[i], "--exposure") && i + 1 < argc)
@@ -140,6 +144,7 @@ struct EXRImage
     std::vector<Channel> channels;
 
     int idx_R = -1, idx_G = -1, idx_B = -1;
+    int idx_skyR = -1, idx_skyG = -1, idx_skyB = -1;
 
     size_t num_pixels() const { return (size_t)width * height; }
 };
@@ -169,6 +174,12 @@ static bool load_exr(const char *path, EXRImage &img)
                 img.idx_G = idx;
             if (it.name() == std::string("B"))
                 img.idx_B = idx;
+            if (it.name() == std::string("sky.R"))
+                img.idx_skyR = idx;
+            if (it.name() == std::string("sky.G"))
+                img.idx_skyG = idx;
+            if (it.name() == std::string("sky.B"))
+                img.idx_skyB = idx;
         }
 
         Imf::FrameBuffer fb;
@@ -356,6 +367,8 @@ int main(int argc, char *argv[])
     printf("  ray grid:   %d×%d\n", params.ray_grid, params.ray_grid);
     printf("  downsample: %d×\n", params.downsample);
     printf("  flare gain: %.1f\n", params.flare_gain);
+    if (params.sky_brightness != 1.0f)
+        printf("  sky bright: %.3f\n", params.sky_brightness);
 
     // ---- Load lens system ----
     LensSystem lens;
@@ -381,6 +394,63 @@ int main(int argc, char *argv[])
     }
 
     size_t np = img.num_pixels();
+
+    // ---- Apply sky brightness scaling ----
+    if (params.sky_brightness != 1.0f)
+    {
+        if (img.idx_skyR >= 0 && img.idx_skyG >= 0 && img.idx_skyB >= 0)
+        {
+            // We have separate sky layers: scale the sky contribution in the
+            // beauty R/G/B channels.  beauty = (beauty - sky) + sky * factor
+            //                                = beauty + sky * (factor - 1)
+            float delta = params.sky_brightness - 1.0f;
+            float *R = img.channels[img.idx_R].data.data();
+            float *G = img.channels[img.idx_G].data.data();
+            float *B = img.channels[img.idx_B].data.data();
+            const float *sR = img.channels[img.idx_skyR].data.data();
+            const float *sG = img.channels[img.idx_skyG].data.data();
+            const float *sB = img.channels[img.idx_skyB].data.data();
+            for (size_t i = 0; i < np; ++i)
+            {
+                R[i] += sR[i] * delta;
+                G[i] += sG[i] * delta;
+                B[i] += sB[i] * delta;
+            }
+            // Also scale the sky layers themselves for the EXR output
+            float *swR = img.channels[img.idx_skyR].data.data();
+            float *swG = img.channels[img.idx_skyG].data.data();
+            float *swB = img.channels[img.idx_skyB].data.data();
+            for (size_t i = 0; i < np; ++i)
+            {
+                swR[i] *= params.sky_brightness;
+                swG[i] *= params.sky_brightness;
+                swB[i] *= params.sky_brightness;
+            }
+            printf("Sky brightness: %.3f (using sky.R/G/B layers)\n", params.sky_brightness);
+        }
+        else
+        {
+            // No sky layers — fall back to scaling all pixels below threshold.
+            // This is a rough approximation: dim pixels are assumed to be sky.
+            float *R = img.channels[img.idx_R].data.data();
+            float *G = img.channels[img.idx_G].data.data();
+            float *B = img.channels[img.idx_B].data.data();
+            int scaled = 0;
+            for (size_t i = 0; i < np; ++i)
+            {
+                float lum = 0.2126f * R[i] + 0.7152f * G[i] + 0.0722f * B[i];
+                if (lum <= params.threshold)
+                {
+                    R[i] *= params.sky_brightness;
+                    G[i] *= params.sky_brightness;
+                    B[i] *= params.sky_brightness;
+                    ++scaled;
+                }
+            }
+            printf("Sky brightness: %.3f (fallback: scaled %d/%zu pixels below threshold)\n",
+                   params.sky_brightness, scaled, np);
+        }
+    }
 
     // ---- Compute FOV ----
     float fov_h = params.fov_deg * (float)M_PI / 180.0f;
