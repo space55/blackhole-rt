@@ -76,6 +76,17 @@ def main() -> None:
         help="Number of parallel flaresim processes (default: 1)",
     )
     parser.add_argument(
+        "--tga",
+        action="store_true",
+        help="Also write tonemapped TGA for each frame",
+    )
+    parser.add_argument(
+        "--tga-dir",
+        type=str,
+        default=None,
+        help="Directory for TGA outputs (default: <output-dir>_tga)",
+    )
+    parser.add_argument(
         "--skip-existing",
         action="store_true",
         help="Skip frames whose output already exists",
@@ -118,14 +129,29 @@ def main() -> None:
 
     os.makedirs(output_dir, exist_ok=True)
 
-    # Build work list: (input_path, output_path)
+    # TGA output directory
+    tga_dir = None
+    if args.tga:
+        tga_dir = (
+            os.path.join(project_root, args.tga_dir)
+            if args.tga_dir
+            else output_dir + "_tga"
+        )
+        os.makedirs(tga_dir, exist_ok=True)
+
+    # Build work list: (input_path, output_path, tga_path_or_None)
     work = []
     for frame_path in frames:
         name = os.path.basename(frame_path)
         out_path = os.path.join(output_dir, name)
+        tga_path = (
+            os.path.join(tga_dir, os.path.splitext(name)[0] + ".tga")
+            if tga_dir
+            else None
+        )
         if args.skip_existing and os.path.isfile(out_path):
             continue
-        work.append((frame_path, out_path))
+        work.append((frame_path, out_path, tga_path))
 
     skipped = len(frames) - len(work)
     total = len(work)
@@ -140,6 +166,8 @@ def main() -> None:
     )
     print(f"  Input:  {input_dir}/")
     print(f"  Output: {output_dir}/")
+    if tga_dir:
+        print(f"  TGA:    {tga_dir}/")
     print(f"  Config: {config}")
     if extra:
         print(f"  Extra:  {' '.join(extra)}")
@@ -148,8 +176,11 @@ def main() -> None:
     print()
 
     if args.dry_run:
-        for in_path, out_path in work:
-            cmd = [binary, config, "--input", in_path, "--output", out_path] + extra
+        for in_path, out_path, tga_path in work:
+            cmd = [binary, config, "--input", in_path, "--output", out_path]
+            if tga_path:
+                cmd += ["--tga", tga_path]
+            cmd += extra
             print(" ".join(cmd))
         return
 
@@ -157,11 +188,14 @@ def main() -> None:
     if args.jobs <= 1:
         wall_start = time_mod.monotonic()
 
-        for i, (in_path, out_path) in enumerate(work):
+        for i, (in_path, out_path, tga_path) in enumerate(work):
             frame_name = os.path.basename(in_path)
             frame_start = time_mod.monotonic()
 
-            cmd = [binary, config, "--input", in_path, "--output", out_path] + extra
+            cmd = [binary, config, "--input", in_path, "--output", out_path]
+            if tga_path:
+                cmd += ["--tga", tga_path]
+            cmd += extra
 
             result = subprocess.run(
                 cmd,
@@ -193,8 +227,11 @@ def main() -> None:
         from concurrent.futures import ProcessPoolExecutor, as_completed
 
         def run_one(idx_in_out):
-            idx, in_path, out_path = idx_in_out
-            cmd = [binary, config, "--input", in_path, "--output", out_path] + extra
+            idx, in_path, out_path, tga_path = idx_in_out
+            cmd = [binary, config, "--input", in_path, "--output", out_path]
+            if tga_path:
+                cmd += ["--tga", tga_path]
+            cmd += extra
             t0 = time_mod.monotonic()
             result = subprocess.run(
                 cmd,
@@ -216,8 +253,8 @@ def main() -> None:
 
         with ProcessPoolExecutor(max_workers=args.jobs) as pool:
             futures = {
-                pool.submit(run_one, (i, inp, outp)): i
-                for i, (inp, outp) in enumerate(work)
+                pool.submit(run_one, (i, inp, outp, tga)): i
+                for i, (inp, outp, tga) in enumerate(work)
             }
 
             for future in as_completed(futures):
