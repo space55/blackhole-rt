@@ -20,6 +20,11 @@
 #include <vector>
 #include <chrono>
 #include <thread>
+#include <atomic>
+
+#ifdef _OPENMP
+#include <omp.h>
+#endif
 
 // ============================================================================
 // CUDA error checking
@@ -714,24 +719,28 @@ bool render_ghosts_gpu(const std::vector<GPUSurface> &surfaces,
     cudaEventDestroy(ev_stop);
 
     // ================================================================
-    // CPU-side: adaptive tent-filter splatting
+    // CPU-side: parallel adaptive tent-filter splatting
     //
-    // Group hits by (pair_idx, source_idx), compute adaptive radius
-    // from actual hit density per group, then splat.
+    // 1. Pre-compute group boundaries + adaptive radii (serial, fast)
+    // 2. Parallel-for over groups with per-thread buffers
+    // 3. Reduce per-thread buffers into output
     // ================================================================
 
-    printf("CPU splatting %d hits with adaptive radii...\n", num_hits);
+    int img_w = config.img_width, img_h = config.img_height;
+    int num_px = img_w * img_h;
+
+    int num_threads = 1;
+#ifdef _OPENMP
+    num_threads = omp_get_max_threads();
+#endif
+
+    printf("CPU splatting %d hits with adaptive radii (%d thread%s)...\n",
+           num_hits, num_threads, num_threads > 1 ? "s" : "");
     auto t_splat = std::chrono::steady_clock::now();
 
     // Sort hits by (pair_idx, source_idx) for grouping
-    // Use a key that combines both: pair_idx * num_sources + source_idx
     int num_sources_i = config.num_sources;
 
-    // Build group boundaries: first pass counts, second pass splats
-    // For memory efficiency, use a map of (pair, source) → vector of indices
-    // But for large hit counts, sorting is more cache-friendly.
-
-    // Sort by group key
     std::vector<int> indices(num_hits);
     for (int i = 0; i < num_hits; ++i)
         indices[i] = i;
@@ -741,80 +750,118 @@ bool render_ghosts_gpu(const std::vector<GPUSurface> &surfaces,
                   long long kb = (long long)h_hits[b].pair_idx * num_sources_i + h_hits[b].source_idx;
                   return ka < kb; });
 
-    // Process groups
-    int gi = 0;
-    int img_w = config.img_width, img_h = config.img_height;
-    int hits_splatted = 0;
-    auto t_last_print = t_splat;
-    while (gi < num_hits)
+    // ---- Step 1: pre-compute group boundaries and adaptive radii ----
+    struct SplatGroup
     {
-        // Find end of this group
-        int g_pair = h_hits[indices[gi]].pair_idx;
-        int g_src = h_hits[indices[gi]].source_idx;
-        int gj = gi;
-        while (gj < num_hits &&
-               h_hits[indices[gj]].pair_idx == g_pair &&
-               h_hits[indices[gj]].source_idx == g_src)
-            ++gj;
+        int begin, end;   // index range in sorted hits
+        float adaptive_r; // tent-filter radius
+    };
+    std::vector<SplatGroup> groups;
+    groups.reserve(1024);
 
-        // Compute adaptive radius from green-channel hits in this group
-        float bbox_min_x = 1e30f, bbox_max_x = -1e30f;
-        float bbox_min_y = 1e30f, bbox_max_y = -1e30f;
-        int green_hits = 0;
-
-        for (int k = gi; k < gj; ++k)
+    {
+        int gi = 0;
+        while (gi < num_hits)
         {
-            const GPURayHit &h = h_hits[indices[k]];
-            if (h.channel == 1) // green
+            int g_pair = h_hits[indices[gi]].pair_idx;
+            int g_src = h_hits[indices[gi]].source_idx;
+            int gj = gi;
+            while (gj < num_hits &&
+                   h_hits[indices[gj]].pair_idx == g_pair &&
+                   h_hits[indices[gj]].source_idx == g_src)
+                ++gj;
+
+            // Compute adaptive radius from green-channel hits
+            float bbox_min_x = 1e30f, bbox_max_x = -1e30f;
+            float bbox_min_y = 1e30f, bbox_max_y = -1e30f;
+            int green_hits = 0;
+            for (int k = gi; k < gj; ++k)
             {
-                bbox_min_x = std::min(bbox_min_x, h.px);
-                bbox_max_x = std::max(bbox_max_x, h.px);
-                bbox_min_y = std::min(bbox_min_y, h.py);
-                bbox_max_y = std::max(bbox_max_y, h.py);
-                ++green_hits;
+                const GPURayHit &h = h_hits[indices[k]];
+                if (h.channel == 1)
+                {
+                    bbox_min_x = std::min(bbox_min_x, h.px);
+                    bbox_max_x = std::max(bbox_max_x, h.px);
+                    bbox_min_y = std::min(bbox_min_y, h.py);
+                    bbox_max_y = std::max(bbox_max_y, h.py);
+                    ++green_hits;
+                }
             }
-        }
+            float adaptive_r = 1.5f;
+            if (green_hits >= 4)
+            {
+                float extent_x = bbox_max_x - bbox_min_x;
+                float extent_y = bbox_max_y - bbox_min_y;
+                float extent = std::max(std::max(extent_x, extent_y), 1.0f);
+                float linear_density = sqrtf((float)green_hits);
+                float spacing = extent / linear_density;
+                adaptive_r = std::clamp(spacing * 1.2f, 1.5f, 80.0f);
+            }
 
-        float adaptive_r = 1.5f;
-        if (green_hits >= 4)
-        {
-            float extent_x = bbox_max_x - bbox_min_x;
-            float extent_y = bbox_max_y - bbox_min_y;
-            float extent = std::max(std::max(extent_x, extent_y), 1.0f);
-            float linear_density = sqrtf((float)green_hits);
-            float spacing = extent / linear_density;
-            adaptive_r = std::clamp(spacing * 1.2f, 1.5f, 80.0f);
+            groups.push_back({gi, gj, adaptive_r});
+            gi = gj;
         }
+    }
 
-        // Splat all hits in this group
-        for (int k = gi; k < gj; ++k)
+    int num_groups = (int)groups.size();
+    printf("  %d groups, sorting took %.2f s\n", num_groups,
+           std::chrono::duration<double>(std::chrono::steady_clock::now() - t_splat).count());
+
+    // ---- Step 2: parallel splat into per-thread buffers ----
+    // Allocate per-thread accumulation buffers
+    std::vector<std::vector<float>> tbuf_r(num_threads, std::vector<float>(num_px, 0.0f));
+    std::vector<std::vector<float>> tbuf_g(num_threads, std::vector<float>(num_px, 0.0f));
+    std::vector<std::vector<float>> tbuf_b(num_threads, std::vector<float>(num_px, 0.0f));
+
+    std::atomic<int> groups_done{0};
+    auto t_splat_loop = std::chrono::steady_clock::now();
+
+#pragma omp parallel for schedule(dynamic, 4)
+    for (int g = 0; g < num_groups; ++g)
+    {
+        int tid = 0;
+#ifdef _OPENMP
+        tid = omp_get_thread_num();
+#endif
+        const SplatGroup &grp = groups[g];
+        for (int k = grp.begin; k < grp.end; ++k)
         {
             const GPURayHit &h = h_hits[indices[k]];
-            float *buf = (h.channel == 0) ? out_r : (h.channel == 1) ? out_g
-                                                                     : out_b;
-            h_splat_tent(buf, img_w, img_h, h.px, h.py, h.value, adaptive_r);
+            float *buf = (h.channel == 0)   ? tbuf_r[tid].data()
+                         : (h.channel == 1) ? tbuf_g[tid].data()
+                                            : tbuf_b[tid].data();
+            h_splat_tent(buf, img_w, img_h, h.px, h.py, h.value, grp.adaptive_r);
         }
 
-        hits_splatted += (gj - gi);
-        gi = gj;
-
-        // Progress / ETA update (at most every 250 ms)
-        auto t_now = std::chrono::steady_clock::now();
-        double since_print = std::chrono::duration<double>(t_now - t_last_print).count();
-        if (since_print >= 0.25 || gi >= num_hits)
+        // ETA progress (from any thread, throttled by atomic check)
+        int done = ++groups_done;
+        if ((done & 63) == 0 || done == num_groups)
         {
-            double elapsed = std::chrono::duration<double>(t_now - t_splat).count();
-            double frac = (double)hits_splatted / num_hits;
+            auto t_now = std::chrono::steady_clock::now();
+            double elapsed = std::chrono::duration<double>(t_now - t_splat_loop).count();
+            double frac = (double)done / num_groups;
             double eta = (frac > 1e-6) ? elapsed / frac * (1.0 - frac) : 0.0;
             int e_m = (int)elapsed / 60, e_s = (int)elapsed % 60;
             int r_m = (int)eta / 60, r_s = (int)eta % 60;
-            printf("\r  Splatting: %d / %d hits  (%.0f%%)  %d:%02d elapsed  ETA %d:%02d   ",
-                   hits_splatted, num_hits, frac * 100.0, e_m, e_s, r_m, r_s);
+            printf("\r  Splatting: %d / %d groups  (%.0f%%)  %d:%02d elapsed  ETA %d:%02d   ",
+                   done, num_groups, frac * 100.0, e_m, e_s, r_m, r_s);
             fflush(stdout);
-            t_last_print = t_now;
         }
     }
     printf("\n");
+
+    // ---- Step 3: reduce per-thread buffers into output ----
+    printf("  Reducing %d thread buffers...\n", num_threads);
+#pragma omp parallel for
+    for (int i = 0; i < num_px; ++i)
+    {
+        for (int t = 0; t < num_threads; ++t)
+        {
+            out_r[i] += tbuf_r[t][i];
+            out_g[i] += tbuf_g[t][i];
+            out_b[i] += tbuf_b[t][i];
+        }
+    }
 
     auto t_end = std::chrono::steady_clock::now();
     double splat_time = std::chrono::duration<double>(t_end - t_splat).count();
