@@ -5,8 +5,10 @@ Render a sequence of black hole frames with an animated accretion disk.
 Usage:
     python render_sequence.py [options]
 
-Produces numbered .tga frames in the build directory by incrementing
+Produces numbered frames in the build directory by incrementing
 the 'time' parameter in scene.txt between renders.
+
+Supports TGA (default), EXR (linear HDR), and HDR (Radiance) output formats.
 """
 
 import argparse
@@ -16,6 +18,13 @@ import shutil
 import subprocess
 import sys
 import time as time_mod
+
+# Map format name → (scene key, extension, keys to disable)
+FORMAT_TABLE = {
+    "tga": ("output_file", ".tga", ["exr_output", "hdr_output", "jpg_output"]),
+    "exr": ("exr_output", ".exr", ["output_file", "hdr_output", "jpg_output"]),
+    "hdr": ("hdr_output", ".hdr", ["output_file", "exr_output", "jpg_output"]),
+}
 
 
 def patch_scene_file(src: str, dst: str, overrides: dict[str, str]) -> None:
@@ -89,7 +98,17 @@ def main() -> None:
         default="frame",
         help="Output filename prefix (default: frame)",
     )
+    parser.add_argument(
+        "-f",
+        "--format",
+        type=str,
+        choices=list(FORMAT_TABLE.keys()),
+        default="exr",
+        help="Output format: tga, exr, or hdr (default: exr)",
+    )
     args = parser.parse_args()
+
+    fmt_key, fmt_ext, fmt_disable = FORMAT_TABLE[args.format]
 
     # Resolve paths relative to the script's directory
     project_root = os.path.dirname(os.path.abspath(__file__))
@@ -116,7 +135,7 @@ def main() -> None:
         f"t={args.time_start + (args.num_frames - 1) * args.time_step:.2f}, "
         f"dt={args.time_step}"
     )
-    print(f"Output: {output_dir}/{args.prefix}_NNNN.tga")
+    print(f"Output: {output_dir}/{args.prefix}_NNNN{fmt_ext} ({args.format.upper()})")
     print()
 
     try:
@@ -124,15 +143,20 @@ def main() -> None:
 
         for i in range(args.num_frames):
             t = args.time_start + i * args.time_step
-            out_file = os.path.join(args.output_dir, f"{args.prefix}_{i:04d}.tga")
+            out_file = os.path.join(args.output_dir, f"{args.prefix}_{i:04d}{fmt_ext}")
+
+            overrides = {
+                "time": f"{t:.6f}",
+                fmt_key: out_file,
+            }
+            # Disable other output formats to avoid redundant writes
+            for key in fmt_disable:
+                overrides[key] = ""
 
             patch_scene_file(
                 scene_src,
                 temp_scene,
-                {
-                    "time": f"{t:.6f}",
-                    "output_file": out_file,
-                },
+                overrides,
             )
 
             frame_start = time_mod.monotonic()
