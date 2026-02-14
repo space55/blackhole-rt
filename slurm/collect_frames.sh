@@ -19,6 +19,8 @@
 #   -o DIR         Output frames subdir              (default: frames)
 #   -p PREFIX      Frame filename prefix             (default: frame)
 #   -L LOCAL_DIR   Local directory to copy into      (default: ./build/frames)
+#   --exr          Expect / collect EXR frames too
+#   --hdr          Expect / collect HDR frames too
 #   --shared-fs    Skip rsync, just verify in-place  (shared filesystem mode)
 #   --nodes LIST   Comma-separated list of node hostnames/IPs to pull from
 #   -h             Show this help
@@ -37,6 +39,8 @@ OUTPUT_DIR="frames"
 PREFIX="frame"
 LOCAL_DIR=""
 SHARED_FS=false
+EXR_OUTPUT=false
+HDR_OUTPUT=false
 NODES=""
 NUM_FRAMES=""
 
@@ -49,6 +53,8 @@ while [[ $# -gt 0 ]]; do
         -p)         PREFIX="$2"; shift 2 ;;
         -L)         LOCAL_DIR="$2"; shift 2 ;;
         --shared-fs) SHARED_FS=true; shift ;;
+        --exr)      EXR_OUTPUT=true; shift ;;
+        --hdr)      HDR_OUTPUT=true; shift ;;
         --nodes)    NODES="$2"; shift 2 ;;
         -h|--help)
             head -26 "$0" | tail -23
@@ -69,6 +75,8 @@ if [[ -f "$JOB_INFO" ]]; then
     NUM_FRAMES="${NUM_FRAMES:-$NUM_FRAMES}"
     PREFIX="${PREFIX:-$PREFIX}"
     OUTPUT_DIR="${OUTPUT_DIR:-$OUTPUT_DIR}"
+    EXR_OUTPUT="${EXR_OUTPUT:-false}"
+    HDR_OUTPUT="${HDR_OUTPUT:-false}"
 fi
 
 if [[ -z "$NUM_FRAMES" ]]; then
@@ -86,6 +94,8 @@ echo " Expected frames: $NUM_FRAMES"
 echo " Remote dir:      $REMOTE_FRAMES_DIR"
 echo " Local dir:       $LOCAL_DIR"
 echo " Shared FS:       $SHARED_FS"
+echo " EXR output:      $EXR_OUTPUT"
+echo " HDR output:      $HDR_OUTPUT"
 echo "============================================"
 echo
 
@@ -107,11 +117,26 @@ if ! $SHARED_FS && [[ -n "$NODES" ]]; then
         node=$(echo "$node" | tr -d ' ')
         echo -n "  Syncing from $node ... "
 
-        if rsync -az --ignore-existing \
+        RSYNC_OK=true
+        rsync -az --ignore-existing \
             "$node:$REMOTE_FRAMES_DIR/${PREFIX}_*.tga" \
-            "$LOCAL_DIR/" 2>/dev/null; then
+            "$LOCAL_DIR/" 2>/dev/null || RSYNC_OK=false
+
+        # Also sync EXR and HDR if enabled
+        if [[ "$EXR_OUTPUT" == "true" ]]; then
+            rsync -az --ignore-existing \
+                "$node:$REMOTE_FRAMES_DIR/${PREFIX}_*.exr" \
+                "$LOCAL_DIR/" 2>/dev/null || true
+        fi
+        if [[ "$HDR_OUTPUT" == "true" ]]; then
+            rsync -az --ignore-existing \
+                "$node:$REMOTE_FRAMES_DIR/${PREFIX}_*.hdr" \
+                "$LOCAL_DIR/" 2>/dev/null || true
+        fi
+
+        if $RSYNC_OK; then
             SYNCED=$(ls "$LOCAL_DIR/${PREFIX}_"*.tga 2>/dev/null | wc -l | tr -d ' ')
-            echo -e "${GREEN}OK${NC} ($SYNCED frames total so far)"
+            echo -e "${GREEN}OK${NC} ($SYNCED TGA frames total so far)"
         else
             echo -e "${YELLOW}SKIP${NC} (unreachable or no frames)"
         fi
@@ -133,7 +158,11 @@ echo "Verifying frame completeness in $FRAMES_DIR ..."
 echo
 
 MISSING=()
+MISSING_EXR=()
+MISSING_HDR=()
 FOUND=0
+FOUND_EXR=0
+FOUND_HDR=0
 TOTAL_SIZE=0
 
 for i in $(seq 0 $((NUM_FRAMES - 1))); do
@@ -151,15 +180,56 @@ for i in $(seq 0 $((NUM_FRAMES - 1))); do
     else
         MISSING+=("$FNAME")
     fi
+
+    # Verify EXR frames
+    if [[ "$EXR_OUTPUT" == "true" ]]; then
+        EXRNAME="${PREFIX}_$(printf '%04d' "$i").exr"
+        EXRPATH="$FRAMES_DIR/$EXRNAME"
+        if [[ -f "$EXRPATH" ]]; then
+            ESIZE=$(stat -f%z "$EXRPATH" 2>/dev/null || stat --format=%s "$EXRPATH" 2>/dev/null || echo 0)
+            if [[ "$ESIZE" -gt 0 ]]; then
+                FOUND_EXR=$((FOUND_EXR + 1))
+                TOTAL_SIZE=$((TOTAL_SIZE + ESIZE))
+            else
+                MISSING_EXR+=("$EXRNAME (empty file)")
+            fi
+        else
+            MISSING_EXR+=("$EXRNAME")
+        fi
+    fi
+
+    # Verify HDR frames
+    if [[ "$HDR_OUTPUT" == "true" ]]; then
+        HDRNAME="${PREFIX}_$(printf '%04d' "$i").hdr"
+        HDRPATH="$FRAMES_DIR/$HDRNAME"
+        if [[ -f "$HDRPATH" ]]; then
+            HSIZE=$(stat -f%z "$HDRPATH" 2>/dev/null || stat --format=%s "$HDRPATH" 2>/dev/null || echo 0)
+            if [[ "$HSIZE" -gt 0 ]]; then
+                FOUND_HDR=$((FOUND_HDR + 1))
+                TOTAL_SIZE=$((TOTAL_SIZE + HSIZE))
+            else
+                MISSING_HDR+=("$HDRNAME (empty file)")
+            fi
+        else
+            MISSING_HDR+=("$HDRNAME")
+        fi
+    fi
 done
 
 # ---------- Report -----------------------------------------------------------
 echo "============================================"
 echo " Frame Verification Report"
 echo "============================================"
-echo -e " Found:   ${GREEN}$FOUND${NC} / $NUM_FRAMES"
+echo -e " TGA found: ${GREEN}$FOUND${NC} / $NUM_FRAMES"
+[[ "$EXR_OUTPUT" == "true" ]] && echo -e " EXR found: ${GREEN}$FOUND_EXR${NC} / $NUM_FRAMES"
+[[ "$HDR_OUTPUT" == "true" ]] && echo -e " HDR found: ${GREEN}$FOUND_HDR${NC} / $NUM_FRAMES"
 
-if [[ ${#MISSING[@]} -eq 0 ]]; then
+ALL_OK=true
+[[ ${#MISSING[@]} -gt 0 ]] && ALL_OK=false
+[[ "$EXR_OUTPUT" == "true" && ${#MISSING_EXR[@]} -gt 0 ]] && ALL_OK=false
+[[ "$HDR_OUTPUT" == "true" && ${#MISSING_HDR[@]} -gt 0 ]] && ALL_OK=false
+
+if $ALL_OK; then
     TOTAL_MB=$(echo "scale=1; $TOTAL_SIZE / 1048576" | bc 2>/dev/null || echo "?")
     echo -e " Status:  ${GREEN}ALL FRAMES PRESENT${NC}"
     echo " Total:   ${TOTAL_MB} MB"
@@ -167,15 +237,37 @@ if [[ ${#MISSING[@]} -eq 0 ]]; then
     echo
     echo "Ready to encode video:"
     echo "  ./make_video.sh -i $FRAMES_DIR"
+    [[ "$EXR_OUTPUT" == "true" ]] && echo "  ./make_video.sh -i $FRAMES_DIR -f exr   # from EXR (full HDR)"
 else
-    echo -e " Missing: ${RED}${#MISSING[@]}${NC} frames"
+    TOTAL_MISSING=$(( ${#MISSING[@]} ))
+    [[ "$EXR_OUTPUT" == "true" ]] && TOTAL_MISSING=$((TOTAL_MISSING + ${#MISSING_EXR[@]}))
+    [[ "$HDR_OUTPUT" == "true" ]] && TOTAL_MISSING=$((TOTAL_MISSING + ${#MISSING_HDR[@]}))
+    echo -e " Missing: ${RED}${TOTAL_MISSING}${NC} files"
     echo "============================================"
     echo
-    echo "Missing frames:"
-    for m in "${MISSING[@]}"; do
-        echo -e "  ${RED}✗${NC} $m"
-    done
-    echo
+
+    if [[ ${#MISSING[@]} -gt 0 ]]; then
+        echo "Missing TGA frames:"
+        for m in "${MISSING[@]}"; do
+            echo -e "  ${RED}✗${NC} $m"
+        done
+        echo
+    fi
+    if [[ "$EXR_OUTPUT" == "true" && ${#MISSING_EXR[@]} -gt 0 ]]; then
+        echo "Missing EXR frames:"
+        for m in "${MISSING_EXR[@]}"; do
+            echo -e "  ${RED}✗${NC} $m"
+        done
+        echo
+    fi
+    if [[ "$HDR_OUTPUT" == "true" && ${#MISSING_HDR[@]} -gt 0 ]]; then
+        echo "Missing HDR frames:"
+        for m in "${MISSING_HDR[@]}"; do
+            echo -e "  ${RED}✗${NC} $m"
+        done
+        echo
+    fi
+
     echo "To re-render missing frames, resubmit with specific array indices:"
 
     # Build a compact array index list for resubmission

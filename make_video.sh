@@ -11,6 +11,7 @@
 #   -o FILE     Output video filename   (default: blackhole.mp4)
 #   -r FPS      Framerate               (default: 30)
 #   -c CRF      Quality (0=lossless, 23=default, 51=worst)  (default: 18)
+#   -f FORMAT   Input frame format: tga, exr, hdr  (default: tga)
 #
 
 set -euo pipefail
@@ -21,15 +22,17 @@ PREFIX="frame"
 OUTPUT="blackhole.mp4"
 FPS=24
 CRF=18
+FORMAT="tga"
 
 # Parse arguments
-while getopts "i:p:o:r:c:h" opt; do
+while getopts "i:p:o:r:c:f:h" opt; do
     case "$opt" in
         i) FRAMES_DIR="$OPTARG" ;;
         p) PREFIX="$OPTARG" ;;
         o) OUTPUT="$OPTARG" ;;
         r) FPS="$OPTARG" ;;
         c) CRF="$OPTARG" ;;
+        f) FORMAT="$OPTARG" ;;
         h)
             head -14 "$0" | tail -12
             exit 0
@@ -50,23 +53,33 @@ if [[ ! -d "$FRAMES_DIR" ]]; then
     exit 1
 fi
 
-NUM_FRAMES=$(ls "$FRAMES_DIR"/${PREFIX}_*.tga 2>/dev/null | wc -l | tr -d ' ')
+NUM_FRAMES=$(ls "$FRAMES_DIR"/${PREFIX}_*.${FORMAT} 2>/dev/null | wc -l | tr -d ' ')
 if [[ "$NUM_FRAMES" -eq 0 ]]; then
-    echo "Error: no ${PREFIX}_*.tga files found in $FRAMES_DIR" >&2
+    echo "Error: no ${PREFIX}_*.${FORMAT} files found in $FRAMES_DIR" >&2
     exit 1
 fi
 
-echo "Encoding $NUM_FRAMES frames from $FRAMES_DIR/${PREFIX}_NNNN.tga"
+echo "Encoding $NUM_FRAMES frames from $FRAMES_DIR/${PREFIX}_NNNN.${FORMAT}"
 echo "  -> $OUTPUT  (${FPS} fps, CRF ${CRF})"
 echo
 
+# EXR/HDR inputs are linear float — apply a basic tonemap for video output
+EXTRA_INPUT_ARGS=()
+EXTRA_FILTER_ARGS=""
+if [[ "$FORMAT" == "exr" || "$FORMAT" == "hdr" ]]; then
+    # Apply Reinhard tonemap and convert to sRGB for video encoding
+    EXTRA_FILTER_ARGS="-vf zscale=transfer=bt709:primaries=bt709:matrix=bt709,tonemap=reinhard:desat=0,format=yuv420p"
+    echo "  (applying tonemap for linear HDR -> SDR video)"
+fi
+
 ffmpeg -y \
     -framerate "$FPS" \
-    -i "${FRAMES_DIR}/${PREFIX}_%04d.tga" \
+    "${EXTRA_INPUT_ARGS[@]}" \
+    -i "${FRAMES_DIR}/${PREFIX}_%04d.${FORMAT}" \
     -c:v libx264 \
     -preset slow \
     -crf "$CRF" \
-    -pix_fmt yuv420p \
+    ${EXTRA_FILTER_ARGS:--pix_fmt yuv420p} \
     -movflags +faststart \
     "$OUTPUT"
 

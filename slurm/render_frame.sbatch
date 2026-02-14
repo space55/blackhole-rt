@@ -12,6 +12,8 @@
 #   BHRT_TIME_STEP     — time increment per frame    (default: 0.5)
 #   BHRT_PREFIX        — output frame name prefix    (default: frame)
 #   BHRT_OUTPUT_DIR    — where to write frames       (default: frames)
+#   BHRT_EXR           — also render EXR output      (default: false)
+#   BHRT_HDR           — also render HDR output      (default: false)
 # ============================================================================
 
 #SBATCH --job-name=bhrt-render
@@ -29,6 +31,8 @@ TIME_START="${BHRT_TIME_START:-0.0}"
 TIME_STEP="${BHRT_TIME_STEP:-0.5}"
 PREFIX="${BHRT_PREFIX:-frame}"
 OUTPUT_DIR="${BHRT_OUTPUT_DIR:-frames}"
+EXR_OUTPUT="${BHRT_EXR:-false}"
+HDR_OUTPUT="${BHRT_HDR:-false}"
 
 BUILD_DIR="$PROJECT_DIR/build"
 BINARY="$BUILD_DIR/bhrt3"
@@ -49,13 +53,22 @@ FRAME_INDEX=${SLURM_ARRAY_TASK_ID}
 
 # Compute the time value for this frame
 TIME_VAL=$(python3 -c "print(f'{${TIME_START} + ${FRAME_INDEX} * ${TIME_STEP}:.6f}')")
-OUT_FILE="${OUTPUT_DIR}/${PREFIX}_$(printf '%04d' "$FRAME_INDEX").tga"
+FRAME_TAG="$(printf '%04d' "$FRAME_INDEX")"
+OUT_FILE="${OUTPUT_DIR}/${PREFIX}_${FRAME_TAG}.tga"
+
+# EXR and HDR output paths (empty string disables in scene config)
+EXR_FILE=""
+HDR_FILE=""
+[[ "$EXR_OUTPUT" == "true" ]] && EXR_FILE="${OUTPUT_DIR}/${PREFIX}_${FRAME_TAG}.exr"
+[[ "$HDR_OUTPUT" == "true" ]] && HDR_FILE="${OUTPUT_DIR}/${PREFIX}_${FRAME_TAG}.hdr"
 
 echo "=== BHRT Frame Render ==="
 echo "Node:        $(hostname) ($(tailscale ip -4 2>/dev/null || echo 'no-tailscale'))"
 echo "Frame:       $FRAME_INDEX"
 echo "Time:        $TIME_VAL"
 echo "Output:      $OUT_FILE"
+[[ -n "$EXR_FILE" ]] && echo "EXR output:  $EXR_FILE"
+[[ -n "$HDR_FILE" ]] && echo "HDR output:  $HDR_FILE"
 echo "Scene:       $SCENE_SRC"
 echo "CPUs:        ${SLURM_CPUS_PER_TASK:-1}"
 echo "========================="
@@ -64,23 +77,31 @@ echo "========================="
 TASK_SCENE="$BUILD_DIR/_slurm_scene_${SLURM_JOB_ID}_${FRAME_INDEX}.txt"
 
 # Patch scene file: override time and output_file
-python3 - "$SCENE_SRC" "$TASK_SCENE" "$TIME_VAL" "$OUT_FILE" <<'PATCHER'
+python3 - "$SCENE_SRC" "$TASK_SCENE" "$TIME_VAL" "$OUT_FILE" "$EXR_FILE" "$HDR_FILE" <<'PATCHER'
 import re, sys
 src, dst, time_val, out_file = sys.argv[1], sys.argv[2], sys.argv[3], sys.argv[4]
-overrides = {"time": time_val, "output_file": out_file}
+exr_file, hdr_file = sys.argv[5], sys.argv[6]
+overrides = {"time": time_val, "output_file": out_file,
+             "exr_output": exr_file, "hdr_output": hdr_file}
 with open(src) as f:
     lines = f.readlines()
+seen = set()
 with open(dst, "w") as f:
     for line in lines:
         stripped = line.split("#")[0].strip()
         matched = False
         for key, val in overrides.items():
             if re.match(rf"^{re.escape(key)}\s*=", stripped):
-                f.write(re.sub(r"=\s*\S+", f"= {val}", line.split("#")[0]).rstrip() + "\n")
+                f.write(f"{key} = {val}\n")
+                seen.add(key)
                 matched = True
                 break
         if not matched:
             f.write(line)
+    # Append any overrides whose keys weren't already in the scene file
+    for key, val in overrides.items():
+        if key not in seen:
+            f.write(f"{key} = {val}\n")
 PATCHER
 
 # ---------- Ensure output directory exists -----------------------------------
@@ -101,7 +122,10 @@ rm -f "$TASK_SCENE"
 
 # ---------- Report -----------------------------------------------------------
 if [[ $EXIT_CODE -eq 0 ]]; then
-    echo "SUCCESS: Frame $FRAME_INDEX rendered in ${ELAPSED_MS}ms -> $OUT_FILE"
+    OUTPUTS="$OUT_FILE"
+    [[ -n "$EXR_FILE" ]] && OUTPUTS="$OUTPUTS, $EXR_FILE"
+    [[ -n "$HDR_FILE" ]] && OUTPUTS="$OUTPUTS, $HDR_FILE"
+    echo "SUCCESS: Frame $FRAME_INDEX rendered in ${ELAPSED_MS}ms -> $OUTPUTS"
 else
     echo "FAILED: Frame $FRAME_INDEX exited with code $EXIT_CODE" >&2
 fi

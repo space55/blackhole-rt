@@ -21,6 +21,8 @@
 #   -m MEMORY    Memory per task (e.g. 4G)           (default: 4G)
 #   -T TIME      Max wall time per frame             (default: 01:00:00)
 #   --cpu        Submit to cpu only partition.       (default: off)
+#   --exr        Also output multi-layer OpenEXR per frame (.exr)
+#   --hdr        Also output Radiance HDR per frame (.hdr)
 #   --dry-run    Show the sbatch command without submitting
 #   -h           Show this help
 # ============================================================================
@@ -40,6 +42,8 @@ CPUS=4
 MEMORY="4G"
 WALL_TIME="01:00:00"
 USE_GPU=true
+EXR_OUTPUT=false
+HDR_OUTPUT=false
 DRY_RUN=false
 
 # ---------- Parse arguments --------------------------------------------------
@@ -57,6 +61,8 @@ while [[ $# -gt 0 ]]; do
         -m)         MEMORY="$2"; shift 2 ;;
         -T)         WALL_TIME="$2"; shift 2 ;;
         --cpu)      USE_GPU=false; PARTITION="cpu"; shift ;;
+        --exr)      EXR_OUTPUT=true; shift ;;
+        --hdr)      HDR_OUTPUT=true; shift ;;
         --dry-run)  DRY_RUN=true; shift ;;
         -h|--help)
             head -27 "$0" | tail -24
@@ -95,6 +101,8 @@ echo " CPUs/task:  $CPUS"
 echo " Memory:     $MEMORY"
 echo " Wall time:  $WALL_TIME"
 echo " GPU:        $USE_GPU"
+echo " EXR output: $EXR_OUTPUT"
+echo " HDR output: $HDR_OUTPUT"
 echo "============================================"
 
 # Check cluster is reachable
@@ -177,7 +185,7 @@ fi
 
 # Export configuration as environment variables
 SBATCH_CMD+=(
-    --export="ALL,BHRT_PROJECT_DIR=$PROJECT_DIR,BHRT_SCENE_FILE=$SCENE_FILE,BHRT_TIME_START=$TIME_START,BHRT_TIME_STEP=$TIME_STEP,BHRT_PREFIX=$PREFIX,BHRT_OUTPUT_DIR=$OUTPUT_DIR"
+    --export="ALL,BHRT_PROJECT_DIR=$PROJECT_DIR,BHRT_SCENE_FILE=$SCENE_FILE,BHRT_TIME_START=$TIME_START,BHRT_TIME_STEP=$TIME_STEP,BHRT_PREFIX=$PREFIX,BHRT_OUTPUT_DIR=$OUTPUT_DIR,BHRT_EXR=$EXR_OUTPUT,BHRT_HDR=$HDR_OUTPUT"
 )
 
 SBATCH_CMD+=("$SBATCH_SCRIPT")
@@ -218,6 +226,8 @@ TIME_STEP=$TIME_STEP
 PREFIX=$PREFIX
 OUTPUT_DIR=$OUTPUT_DIR
 PROJECT_DIR=$PROJECT_DIR
+EXR_OUTPUT=$EXR_OUTPUT
+HDR_OUTPUT=$HDR_OUTPUT
 SUBMITTED_AT=$(date -Iseconds)
 EOF
 fi

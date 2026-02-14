@@ -121,11 +121,19 @@ show_status() {
         source "$JOB_INFO"
         EXPECTED=${NUM_FRAMES:-0}
         PREFIX=${PREFIX:-frame}
+        EXR_OUTPUT=${EXR_OUTPUT:-false}
+        HDR_OUTPUT=${HDR_OUTPUT:-false}
 
         if [[ -d "$FRAMES_DIR" ]]; then
             RENDERED=$(ls "$FRAMES_DIR/${PREFIX}_"*.tga 2>/dev/null | wc -l | tr -d ' ')
+            RENDERED_EXR=0
+            RENDERED_HDR=0
+            [[ "$EXR_OUTPUT" == "true" ]] && RENDERED_EXR=$(ls "$FRAMES_DIR/${PREFIX}_"*.exr 2>/dev/null | wc -l | tr -d ' ')
+            [[ "$HDR_OUTPUT" == "true" ]] && RENDERED_HDR=$(ls "$FRAMES_DIR/${PREFIX}_"*.hdr 2>/dev/null | wc -l | tr -d ' ')
         else
             RENDERED=0
+            RENDERED_EXR=0
+            RENDERED_HDR=0
         fi
 
         if [[ "$EXPECTED" -gt 0 ]]; then
@@ -138,13 +146,19 @@ show_status() {
 
             echo "  Job ID:     ${JOB_ID:-?}"
             echo "  Submitted:  ${SUBMITTED_AT:-?}"
-            echo -e "  Progress:   [${GREEN}${BAR}${NC}] ${PCT}%  (${RENDERED}/${EXPECTED})"
+            echo -e "  TGA:        [${GREEN}${BAR}${NC}] ${PCT}%  (${RENDERED}/${EXPECTED})"
+            [[ "$EXR_OUTPUT" == "true" ]] && echo "  EXR:        ${RENDERED_EXR}/${EXPECTED}"
+            [[ "$HDR_OUTPUT" == "true" ]] && echo "  HDR:        ${RENDERED_HDR}/${EXPECTED}"
         else
             echo "  No frame count in job info."
         fi
     elif [[ -d "$FRAMES_DIR" ]]; then
         RENDERED=$(ls "$FRAMES_DIR/"*.tga 2>/dev/null | wc -l | tr -d ' ')
+        RENDERED_EXR=$(ls "$FRAMES_DIR/"*.exr 2>/dev/null | wc -l | tr -d ' ')
+        RENDERED_HDR=$(ls "$FRAMES_DIR/"*.hdr 2>/dev/null | wc -l | tr -d ' ')
         echo "  Found $RENDERED .tga frames in $FRAMES_DIR (no job metadata)"
+        [[ "$RENDERED_EXR" -gt 0 ]] && echo "  Found $RENDERED_EXR .exr frames"
+        [[ "$RENDERED_HDR" -gt 0 ]] && echo "  Found $RENDERED_HDR .hdr frames"
     else
         echo "  No frames directory or job info found."
     fi

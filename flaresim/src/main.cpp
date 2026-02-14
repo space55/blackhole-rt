@@ -43,17 +43,17 @@ struct Params
     std::string output_file;
     std::string lens_file;
 
-    float fov_deg = 60.0f;      // horizontal FOV in degrees
-    float threshold = 3.0f;     // bright pixel luminance threshold
-    int ray_grid = 64;          // entrance pupil grid per dimension
-    float min_ghost = 1e-7f;    // ghost pair pre-filter threshold
-    int downsample = 4;         // downsample bright pixels by this factor
-    float exposure = 1.0f;      // exposure multiplier for TGA
-    float tonemap = 1.0f;       // tonemap compression for TGA
-    float flare_gain = 1000.0f; // ghost intensity multiplier (default high for visibility)
+    float fov_deg = 60.0f;       // horizontal FOV in degrees
+    float threshold = 3.0f;      // bright pixel luminance threshold
+    int ray_grid = 64;           // entrance pupil grid per dimension
+    float min_ghost = 1e-7f;     // ghost pair pre-filter threshold
+    int downsample = 4;          // downsample bright pixels by this factor
+    float exposure = 1.0f;       // exposure multiplier for TGA
+    float tonemap = 1.0f;        // tonemap compression for TGA
+    float flare_gain = 1000.0f;  // ghost intensity multiplier (default high for visibility)
     float sky_brightness = 1.0f; // sky layer multiplier (requires sky.R/G/B layers in EXR)
-    std::string tga_file;       // optional TGA output path
-    std::string debug_tga;      // optional debug TGA: only bright pixels above threshold
+    std::string tga_file;        // optional TGA output path
+    std::string debug_tga;       // optional debug TGA: only bright pixels above threshold
 };
 
 static void print_usage(const char *prog)

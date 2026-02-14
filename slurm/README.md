@@ -97,6 +97,12 @@ sinfo                          # Should show all nodes in "idle" state
 # With GPU acceleration:
 ./slurm/submit_render.sh -n 120 --gpu
 
+# With multi-layer EXR output (for flaresim / grading):
+./slurm/submit_render.sh -n 120 --exr
+
+# With both EXR and HDR:
+./slurm/submit_render.sh -n 120 --exr --hdr
+
 # Dry run (preview the sbatch command):
 ./slurm/submit_render.sh -n 120 --dry-run
 ```
@@ -117,8 +123,16 @@ squeue -u $USER                # Raw Slurm queue
 # If using a shared filesystem:
 ./slurm/collect_frames.sh --shared-fs
 
-# Assemble into video:
+# Assemble TGA frames into video:
 ./make_video.sh -i build/frames -o blackhole.mp4
+
+# Assemble from EXR (with automatic tonemapping):
+./make_video.sh -i build/frames -f exr -o blackhole.mp4
+
+# Post-process EXR frames through flaresim before encoding:
+# for f in build/frames/frame_*.exr; do
+#   ./flaresim/build/flaresim --input "$f" --output "graded_${f}" ...
+# done
 ```
 
 ## File Overview
@@ -136,19 +150,21 @@ squeue -u $USER                # Raw Slurm queue
 
 ### `submit_render.sh`
 
-| Flag        | Default   | Description                       |
-| ----------- | --------- | --------------------------------- |
-| `-n`        | 60        | Number of frames                  |
-| `-t0`       | 0.0       | Starting time value               |
-| `-dt`       | 0.5       | Time step per frame               |
-| `-p`        | frame     | Filename prefix                   |
-| `-d`        | /opt/bhrt | Project directory on nodes        |
-| `-P`        | cpu       | Slurm partition                   |
-| `-c`        | 4         | CPUs per task                     |
-| `-m`        | 4G        | Memory per task                   |
-| `-T`        | 01:00:00  | Wall time limit per frame         |
-| `--gpu`     | off       | Use GPU partition + request 1 GPU |
-| `--dry-run` | off       | Preview without submitting        |
+| Flag        | Default   | Description                               |
+| ----------- | --------- | ----------------------------------------- |
+| `-n`        | 60        | Number of frames                          |
+| `-t0`       | 0.0       | Starting time value                       |
+| `-dt`       | 0.5       | Time step per frame                       |
+| `-p`        | frame     | Filename prefix                           |
+| `-d`        | /opt/bhrt | Project directory on nodes                |
+| `-P`        | cpu       | Slurm partition                           |
+| `-c`        | 4         | CPUs per task                             |
+| `-m`        | 4G        | Memory per task                           |
+| `-T`        | 01:00:00  | Wall time limit per frame                 |
+| `--gpu`     | off       | Use GPU partition + request 1 GPU         |
+| `--exr`     | off       | Also output multi-layer OpenEXR per frame |
+| `--hdr`     | off       | Also output Radiance HDR per frame        |
+| `--dry-run` | off       | Preview without submitting                |
 
 ### `collect_frames.sh`
 
@@ -157,6 +173,8 @@ squeue -u $USER                # Raw Slurm queue
 | `-n`          | from job info  | Expected frame count        |
 | `-d`          | /opt/bhrt      | Project directory           |
 | `-L`          | ./build/frames | Local collection directory  |
+| `--exr`       | from job info  | Expect / collect EXR frames |
+| `--hdr`       | from job info  | Expect / collect HDR frames |
 | `--shared-fs` | off            | Skip rsync, verify in-place |
 | `--nodes`     | auto-detect    | Comma-separated node list   |
 
