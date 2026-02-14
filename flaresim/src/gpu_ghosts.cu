@@ -7,7 +7,10 @@
 //      - traces 3 wavelengths, writes hits to compacted output via atomicAdd
 //   3. Compute per-group adaptive splat radii on GPU (no sorting — uses
 //      pair_idx × num_sources + source_idx as a perfect hash key)
-//   4. Splat kernel: one thread per hit, tent-filter splat with atomicAdd
+//   4. Tile-based splatting:
+//      a. Bin hits into image tiles based on footprint overlap
+//      b. One thread block per tile, accumulate in shared memory
+//      c. Write tile to global (no atomics — tiles are disjoint)
 //   5. Download output image to host
 //
 // Everything stays on-device — no hit buffer download required.
@@ -374,6 +377,7 @@ __global__ void ghost_trace_kernel(
     const GPUSurface *surfaces,
     const GPUBrightPixel *sources,
     const GPUGhostPair *pairs,
+    const int2 *grid_lut,
     GPURayHit *hit_buffer,
     int *hit_count,
     int max_hits,
@@ -401,33 +405,9 @@ __global__ void ghost_trace_kernel(
     const GPUBrightPixel &src = sources[source_idx];
     int N = config.ray_grid;
 
-    // Map grid_sample → (gx, gy) within circular aperture
-    // We iterate the same way as CPU: scan NxN, skip outside circle
-    int gx = -1, gy = -1;
-    {
-        int count = 0;
-        for (int yy = 0; yy < N && gx < 0; ++yy)
-        {
-            for (int xx = 0; xx < N; ++xx)
-            {
-                float u = ((xx + 0.5f) / N) * 2.0f - 1.0f;
-                float v = ((yy + 0.5f) / N) * 2.0f - 1.0f;
-                if (u * u + v * v <= 1.0f)
-                {
-                    if (count == grid_sample)
-                    {
-                        gx = xx;
-                        gy = yy;
-                        break;
-                    }
-                    ++count;
-                }
-            }
-        }
-    }
-
-    if (gx < 0)
-        return;
+    // O(1) grid_sample → (gx, gy) via precomputed lookup table
+    int gx = grid_lut[grid_sample].x;
+    int gy = grid_lut[grid_sample].y;
 
     // Simple hash-based jitter (deterministic, matches CPU behavior intent)
     unsigned int seed = (unsigned int)(source_idx * 7919 + a * 131 + b * 1031 + gx * 97 + gy * 53);
@@ -501,7 +481,8 @@ __global__ void ghost_trace_kernel(
 // as a perfect hash into fixed-size per-group arrays.  A single pass
 // with atomicMin/Max/Add accumulates green-channel bounding boxes,
 // then a tiny kernel converts those to adaptive tent-filter radii.
-// Finally, one thread per hit does the tent splat with atomicAdd.
+// Finally, hits are binned into image tiles and splatted using
+// shared-memory accumulation (one thread block per tile).
 // ============================================================================
 
 // CAS-based atomicMin/Max for float (works for all float values)
@@ -590,11 +571,47 @@ __global__ void compute_radii_kernel(float *radii,
     radii[g] = r;
 }
 
-// One thread per hit: tent-filter splat with atomicAdd
-__global__ void splat_tent_kernel(const GPURayHit *hits, int num_hits,
-                                  int num_sources, const float *group_radii,
-                                  float *out_r, float *out_g, float *out_b,
-                                  int img_w, int img_h)
+// ============================================================================
+// Tile-based splatting
+//
+// Instead of one-thread-per-hit doing atomicAdd on global memory (extreme
+// contention for spatially-clustered ghost hits), we:
+//
+//   1. Bin hits into image tiles based on their footprint overlap
+//   2. One thread block per tile accumulates in shared memory
+//   3. Write tile to global memory (no atomics — tiles are disjoint)
+//
+// Shared-memory atomicAdd is ~50× faster than global for float, and the
+// final write-back is a plain store since each pixel belongs to exactly
+// one tile.
+// ============================================================================
+
+#define SPLAT_TILE_W 16
+#define SPLAT_TILE_H 16
+#define SPLAT_TILE_PX (SPLAT_TILE_W * SPLAT_TILE_H)
+
+// Helper: compute the tile range a hit's footprint overlaps
+__device__ void d_hit_tile_range(float px, float py, float radius,
+                                 int tiles_x, int tiles_y, int img_w, int img_h,
+                                 int &tx0, int &tx1, int &ty0, int &ty1)
+{
+    float r = fmaxf(radius, 1.0f);
+    int px0 = max((int)floorf(px - r), 0);
+    int px1 = min((int)ceilf(px + r), img_w - 1);
+    int py0 = max((int)floorf(py - r), 0);
+    int py1 = min((int)ceilf(py + r), img_h - 1);
+    tx0 = max(px0 / SPLAT_TILE_W, 0);
+    tx1 = min(px1 / SPLAT_TILE_W, tiles_x - 1);
+    ty0 = max(py0 / SPLAT_TILE_H, 0);
+    ty1 = min(py1 / SPLAT_TILE_H, tiles_y - 1);
+}
+
+// Pass 1: count how many hits land in each tile
+__global__ void count_tile_hits_kernel(const GPURayHit *hits, int num_hits,
+                                       int num_sources, const float *group_radii,
+                                       int *tile_counts,
+                                       int tiles_x, int tiles_y,
+                                       int img_w, int img_h)
 {
     int i = blockIdx.x * blockDim.x + threadIdx.x;
     if (i >= num_hits)
@@ -603,54 +620,179 @@ __global__ void splat_tent_kernel(const GPURayHit *hits, int num_hits,
     const GPURayHit &h = hits[i];
     int gkey = h.pair_idx * num_sources + h.source_idx;
     float radius = group_radii[gkey];
-    float *buf = (h.channel == 0) ? out_r : (h.channel == 1) ? out_g
-                                                              : out_b;
 
-    if (radius <= 1.5f)
-    {
-        // Bilinear splat: 4 pixels
-        int x0 = (int)floorf(h.px - 0.5f);
-        int y0 = (int)floorf(h.py - 0.5f);
-        float fx = (h.px - 0.5f) - x0;
-        float fy = (h.py - 0.5f) - y0;
-        if (x0 >= 0 && x0 < img_w && y0 >= 0 && y0 < img_h)
-            atomicAdd(&buf[y0 * img_w + x0], h.value * (1.0f - fx) * (1.0f - fy));
-        if (x0 + 1 >= 0 && x0 + 1 < img_w && y0 >= 0 && y0 < img_h)
-            atomicAdd(&buf[y0 * img_w + x0 + 1], h.value * fx * (1.0f - fy));
-        if (x0 >= 0 && x0 < img_w && y0 + 1 >= 0 && y0 + 1 < img_h)
-            atomicAdd(&buf[(y0 + 1) * img_w + x0], h.value * (1.0f - fx) * fy);
-        if (x0 + 1 >= 0 && x0 + 1 < img_w && y0 + 1 >= 0 && y0 + 1 < img_h)
-            atomicAdd(&buf[(y0 + 1) * img_w + x0 + 1], h.value * fx * fy);
+    int tx0, tx1, ty0, ty1;
+    d_hit_tile_range(h.px, h.py, radius, tiles_x, tiles_y, img_w, img_h,
+                     tx0, tx1, ty0, ty1);
+
+    for (int ty = ty0; ty <= ty1; ++ty)
+        for (int tx = tx0; tx <= tx1; ++tx)
+            atomicAdd(&tile_counts[ty * tiles_x + tx], 1);
+}
+
+// Pass 2: scatter hit indices into per-tile bins
+__global__ void fill_tile_bins_kernel(const GPURayHit *hits, int num_hits,
+                                      int num_sources, const float *group_radii,
+                                      const int *tile_offsets, int *tile_cursors,
+                                      int *tile_bins,
+                                      int tiles_x, int tiles_y,
+                                      int img_w, int img_h)
+{
+    int i = blockIdx.x * blockDim.x + threadIdx.x;
+    if (i >= num_hits)
         return;
+
+    const GPURayHit &h = hits[i];
+    int gkey = h.pair_idx * num_sources + h.source_idx;
+    float radius = group_radii[gkey];
+
+    int tx0, tx1, ty0, ty1;
+    d_hit_tile_range(h.px, h.py, radius, tiles_x, tiles_y, img_w, img_h,
+                     tx0, tx1, ty0, ty1);
+
+    for (int ty = ty0; ty <= ty1; ++ty)
+        for (int tx = tx0; tx <= tx1; ++tx)
+        {
+            int tidx = ty * tiles_x + tx;
+            int slot = atomicAdd(&tile_cursors[tidx], 1);
+            tile_bins[tile_offsets[tidx] + slot] = i;
+        }
+}
+
+// Pass 3: one thread-block per tile, shared-memory accumulation
+//
+// Each block owns a SPLAT_TILE_W × SPLAT_TILE_H region of the output.
+// Threads cooperatively iterate over all hits binned to this tile,
+// computing tent/bilinear weights and accumulating via fast shared-memory
+// atomicAdd.  The final write-back to global memory is a plain store.
+__global__ void splat_tiles_kernel(const GPURayHit *hits,
+                                   const int *tile_offsets, const int *tile_bins,
+                                   int num_sources, const float *group_radii,
+                                   float *out_r, float *out_g, float *out_b,
+                                   int tiles_x, int tiles_y,
+                                   int img_w, int img_h)
+{
+    __shared__ float s_r[SPLAT_TILE_PX];
+    __shared__ float s_g[SPLAT_TILE_PX];
+    __shared__ float s_b[SPLAT_TILE_PX];
+
+    int tile_idx = blockIdx.x;
+    if (tile_idx >= tiles_x * tiles_y)
+        return;
+
+    int tile_tx = tile_idx % tiles_x;
+    int tile_ty = tile_idx / tiles_x;
+    int tile_x0 = tile_tx * SPLAT_TILE_W;
+    int tile_y0 = tile_ty * SPLAT_TILE_H;
+
+    // Zero shared memory
+    for (int i = threadIdx.x; i < SPLAT_TILE_PX; i += blockDim.x)
+    {
+        s_r[i] = 0.0f;
+        s_g[i] = 0.0f;
+        s_b[i] = 0.0f;
+    }
+    __syncthreads();
+
+    int begin = tile_offsets[tile_idx];
+    int end = tile_offsets[tile_idx + 1];
+
+    // Cooperatively process all hits assigned to this tile
+    for (int j = begin + threadIdx.x; j < end; j += blockDim.x)
+    {
+        int hi = tile_bins[j];
+        const GPURayHit &h = hits[hi];
+        int gkey = h.pair_idx * num_sources + h.source_idx;
+        float radius = group_radii[gkey];
+        float *s_buf = (h.channel == 0) ? s_r : (h.channel == 1) ? s_g
+                                                                 : s_b;
+
+        if (radius <= 1.5f)
+        {
+            // Bilinear splat — up to 4 pixels
+            int x0 = (int)floorf(h.px - 0.5f);
+            int y0 = (int)floorf(h.py - 0.5f);
+            float fx = (h.px - 0.5f) - x0;
+            float fy = (h.py - 0.5f) - y0;
+            float w00 = (1.0f - fx) * (1.0f - fy);
+            float w10 = fx * (1.0f - fy);
+            float w01 = (1.0f - fx) * fy;
+            float w11 = fx * fy;
+
+            for (int dy = 0; dy <= 1; ++dy)
+            {
+                int gy = y0 + dy;
+                if (gy < tile_y0 || gy >= tile_y0 + SPLAT_TILE_H ||
+                    gy < 0 || gy >= img_h)
+                    continue;
+                int ly = gy - tile_y0;
+                for (int dx = 0; dx <= 1; ++dx)
+                {
+                    int gx = x0 + dx;
+                    if (gx < tile_x0 || gx >= tile_x0 + SPLAT_TILE_W ||
+                        gx < 0 || gx >= img_w)
+                        continue;
+                    int lx = gx - tile_x0;
+                    float w = (dx == 0) ? ((dy == 0) ? w00 : w01)
+                                        : ((dy == 0) ? w10 : w11);
+                    atomicAdd(&s_buf[ly * SPLAT_TILE_W + lx], h.value * w);
+                }
+            }
+            continue;
+        }
+
+        // Tent filter — compute GLOBAL normalization (separable)
+        float inv_r = 1.0f / radius;
+        int gix0 = max((int)floorf(h.px - radius), 0);
+        int gix1 = min((int)ceilf(h.px + radius), img_w - 1);
+        int giy0 = max((int)floorf(h.py - radius), 0);
+        int giy1 = min((int)ceilf(h.py + radius), img_h - 1);
+
+        float sum_wx = 0.0f, sum_wy = 0.0f;
+        for (int x = gix0; x <= gix1; ++x)
+            sum_wx += fmaxf(1.0f - fabsf(x + 0.5f - h.px) * inv_r, 0.0f);
+        for (int y = giy0; y <= giy1; ++y)
+            sum_wy += fmaxf(1.0f - fabsf(y + 0.5f - h.py) * inv_r, 0.0f);
+
+        float tw = sum_wx * sum_wy;
+        if (tw < 1e-12f)
+            continue;
+        float norm = h.value / tw;
+
+        // Splat only the tile-local portion of the footprint
+        int lx0 = max(gix0 - tile_x0, 0);
+        int lx1 = min(gix1 - tile_x0, SPLAT_TILE_W - 1);
+        int ly0 = max(giy0 - tile_y0, 0);
+        int ly1 = min(giy1 - tile_y0, SPLAT_TILE_H - 1);
+
+        for (int ly = ly0; ly <= ly1; ++ly)
+        {
+            int gy = tile_y0 + ly;
+            float wy = fmaxf(1.0f - fabsf(gy + 0.5f - h.py) * inv_r, 0.0f);
+            for (int lx = lx0; lx <= lx1; ++lx)
+            {
+                int gx = tile_x0 + lx;
+                float wx = fmaxf(1.0f - fabsf(gx + 0.5f - h.px) * inv_r, 0.0f);
+                atomicAdd(&s_buf[ly * SPLAT_TILE_W + lx], norm * wx * wy);
+            }
+        }
     }
 
-    // Tent filter splat with separable normalization
-    int ix0 = max((int)floorf(h.px - radius), 0);
-    int ix1 = min((int)ceilf(h.px + radius), img_w - 1);
-    int iy0 = max((int)floorf(h.py - radius), 0);
-    int iy1 = min((int)ceilf(h.py + radius), img_h - 1);
+    __syncthreads();
 
-    float inv_r = 1.0f / radius;
-
-    // Separable: total_w = sum_wx × sum_wy (avoids double-pass over footprint)
-    float sum_wx = 0.0f, sum_wy = 0.0f;
-    for (int x = ix0; x <= ix1; ++x)
-        sum_wx += fmaxf(1.0f - fabsf(x + 0.5f - h.px) * inv_r, 0.0f);
-    for (int y = iy0; y <= iy1; ++y)
-        sum_wy += fmaxf(1.0f - fabsf(y + 0.5f - h.py) * inv_r, 0.0f);
-
-    float tw = sum_wx * sum_wy;
-    if (tw < 1e-12f)
-        return;
-    float norm = h.value / tw;
-
-    for (int y = iy0; y <= iy1; ++y)
+    // Write tile to global output — no atomics, each tile owns its pixels
+    for (int i = threadIdx.x; i < SPLAT_TILE_PX; i += blockDim.x)
     {
-        float wy = fmaxf(1.0f - fabsf(y + 0.5f - h.py) * inv_r, 0.0f);
-        for (int x = ix0; x <= ix1; ++x)
+        int lx = i % SPLAT_TILE_W;
+        int ly = i / SPLAT_TILE_W;
+        int gx = tile_x0 + lx;
+        int gy = tile_y0 + ly;
+        if (gx < img_w && gy < img_h)
         {
-            float wx = fmaxf(1.0f - fabsf(x + 0.5f - h.px) * inv_r, 0.0f);
-            atomicAdd(&buf[y * img_w + x], norm * wx * wy);
+            int gi = gy * img_w + gx;
+            out_r[gi] = s_r[i];
+            out_g[gi] = s_g[i];
+            out_b[gi] = s_b[i];
         }
     }
 }
@@ -720,6 +862,7 @@ bool render_ghosts_gpu(const std::vector<GPUSurface> &surfaces,
     GPUGhostPair *d_pairs = nullptr;
     GPURayHit *d_hits = nullptr;
     int *d_hit_count = nullptr;
+    int2 *d_grid_lut = nullptr;
 
     CUDA_CHECK(cudaMalloc(&d_surfaces, surfaces.size() * sizeof(GPUSurface)));
     CUDA_CHECK(cudaMalloc(&d_sources, sources.size() * sizeof(GPUBrightPixel)));
@@ -735,6 +878,25 @@ bool render_ghosts_gpu(const std::vector<GPUSurface> &surfaces,
                           sources.size() * sizeof(GPUBrightPixel), cudaMemcpyHostToDevice));
     CUDA_CHECK(cudaMemcpy(d_pairs, pairs.data(),
                           pairs.size() * sizeof(GPUGhostPair), cudaMemcpyHostToDevice));
+
+    // Build grid LUT: precompute (gx, gy) for each valid grid sample
+    // Eliminates the O(N²) scan that every trace thread was doing
+    {
+        int N = config.ray_grid;
+        std::vector<int2> h_grid_lut(config.valid_grid_count);
+        int count = 0;
+        for (int yy = 0; yy < N; ++yy)
+            for (int xx = 0; xx < N; ++xx)
+            {
+                float u = ((xx + 0.5f) / N) * 2.0f - 1.0f;
+                float v = ((yy + 0.5f) / N) * 2.0f - 1.0f;
+                if (u * u + v * v <= 1.0f)
+                    h_grid_lut[count++] = {xx, yy};
+            }
+        CUDA_CHECK(cudaMalloc(&d_grid_lut, config.valid_grid_count * sizeof(int2)));
+        CUDA_CHECK(cudaMemcpy(d_grid_lut, h_grid_lut.data(),
+                              config.valid_grid_count * sizeof(int2), cudaMemcpyHostToDevice));
+    }
 
     // Mapped pinned memory for progress counter
     int *h_progress = nullptr;
@@ -754,7 +916,7 @@ bool render_ghosts_gpu(const std::vector<GPUSurface> &surfaces,
     CUDA_CHECK(cudaEventRecord(ev_start));
 
     ghost_trace_kernel<<<num_blocks, threads_per_block>>>(
-        d_surfaces, d_sources, d_pairs,
+        d_surfaces, d_sources, d_pairs, d_grid_lut,
         d_hits, d_hit_count, max_hits, d_progress,
         config);
 
@@ -802,20 +964,23 @@ bool render_ghosts_gpu(const std::vector<GPUSurface> &surfaces,
     cudaFree(d_surfaces);
     cudaFree(d_sources);
     cudaFree(d_pairs);
+    cudaFree(d_grid_lut);
     cudaFree(d_hit_count);
     cudaFreeHost(h_progress);
     cudaEventDestroy(ev_start);
     cudaEventDestroy(ev_stop);
 
     // ================================================================
-    // GPU-side: adaptive tent-filter splatting
+    // GPU-side: adaptive tent-filter splatting (tile-based)
     //
     // Uses pair_idx × num_sources + source_idx as a perfect hash key
     // into per-group arrays, avoiding the need to sort 80M+ hits.
     //
     // 1. Accumulate green-channel bbox per group (atomicMin/Max)
     // 2. Compute adaptive radius per group
-    // 3. Splat kernel: one thread per hit, atomicAdd on output image
+    // 3. Bin hits into image tiles based on footprint overlap
+    // 4. One thread block per tile, accumulate in shared memory
+    // 5. Write tiles to global (no atomics — tiles are disjoint)
     // ================================================================
 
     int img_w = config.img_width, img_h = config.img_height;
@@ -883,32 +1048,109 @@ bool render_ghosts_gpu(const std::vector<GPUSurface> &surfaces,
     cudaFree(d_gmax_y);
     cudaFree(d_green_count);
 
-    // ---- Step 4: splat kernel — one thread per hit ----
-    printf("  Launching splat kernel: %d hits...\n", num_hits);
+    // ---- Step 4: tile-based splatting ----
+    int tiles_x = (img_w + SPLAT_TILE_W - 1) / SPLAT_TILE_W;
+    int tiles_y = (img_h + SPLAT_TILE_H - 1) / SPLAT_TILE_H;
+    int num_tiles = tiles_x * tiles_y;
+    printf("  Tile-based splatting: %dx%d tiles (%dx%d px each)\n",
+           tiles_x, tiles_y, SPLAT_TILE_W, SPLAT_TILE_H);
+
+    // Step 4a: count hits per tile
+    int *d_tile_counts = nullptr;
+    CUDA_CHECK(cudaMalloc(&d_tile_counts, num_tiles * sizeof(int)));
+    CUDA_CHECK(cudaMemset(d_tile_counts, 0, num_tiles * sizeof(int)));
+
+    {
+        int nblk = (num_hits + BLK - 1) / BLK;
+        count_tile_hits_kernel<<<nblk, BLK>>>(
+            d_hits, num_hits, config.num_sources, d_group_radii,
+            d_tile_counts, tiles_x, tiles_y, img_w, img_h);
+        CUDA_CHECK(cudaGetLastError());
+    }
+
+    // Step 4b: prefix sum → tile offsets (small — CPU scan is fine)
+    std::vector<int> h_tile_counts(num_tiles);
+    CUDA_CHECK(cudaMemcpy(h_tile_counts.data(), d_tile_counts,
+                          num_tiles * sizeof(int), cudaMemcpyDeviceToHost));
+    cudaFree(d_tile_counts);
+
+    std::vector<int> h_tile_offsets(num_tiles + 1);
+    h_tile_offsets[0] = 0;
+    for (int t = 0; t < num_tiles; ++t)
+        h_tile_offsets[t + 1] = h_tile_offsets[t] + h_tile_counts[t];
+    long long total_bin_entries = h_tile_offsets[num_tiles];
+
+    printf("  Tile bins: %lld entries (%.1f× expansion from %d hits)\n",
+           total_bin_entries, (double)total_bin_entries / std::max(num_hits, 1),
+           num_hits);
+
+    // Check memory for tile bins
+    size_t bin_bytes = (size_t)total_bin_entries * sizeof(int);
+    {
+        size_t free_now = 0, total_now = 0;
+        CUDA_CHECK(cudaMemGetInfo(&free_now, &total_now));
+        size_t tile_mem = bin_bytes + (size_t)(num_tiles + 1) * sizeof(int) * 2;
+        if (tile_mem > free_now * 0.85)
+        {
+            fprintf(stderr, "GPU: tile bins too large (%.0f MB > %.0f MB free)\n",
+                    tile_mem / (1024.0 * 1024.0), free_now / (1024.0 * 1024.0));
+            cudaFree(d_hits);
+            cudaFree(d_group_radii);
+            cudaFree(d_out_r);
+            cudaFree(d_out_g);
+            cudaFree(d_out_b);
+            return false; // fall back to CPU
+        }
+    }
+
+    int *d_tile_offsets = nullptr, *d_tile_bins = nullptr;
+    int *d_tile_cursors = nullptr;
+    CUDA_CHECK(cudaMalloc(&d_tile_offsets, (num_tiles + 1) * sizeof(int)));
+    CUDA_CHECK(cudaMemcpy(d_tile_offsets, h_tile_offsets.data(),
+                          (num_tiles + 1) * sizeof(int), cudaMemcpyHostToDevice));
+    CUDA_CHECK(cudaMalloc(&d_tile_bins, bin_bytes));
+    CUDA_CHECK(cudaMalloc(&d_tile_cursors, num_tiles * sizeof(int)));
+    CUDA_CHECK(cudaMemset(d_tile_cursors, 0, num_tiles * sizeof(int)));
+
+    // Step 4c: scatter hit indices into tile bins
+    {
+        int nblk = (num_hits + BLK - 1) / BLK;
+        fill_tile_bins_kernel<<<nblk, BLK>>>(
+            d_hits, num_hits, config.num_sources, d_group_radii,
+            d_tile_offsets, d_tile_cursors, d_tile_bins,
+            tiles_x, tiles_y, img_w, img_h);
+        CUDA_CHECK(cudaGetLastError());
+    }
+
+    cudaFree(d_tile_cursors);
+
+    // Step 4d: tile-parallel splat (one block per tile, 256 threads)
+    printf("  Launching tile splat: %d tiles...\n", num_tiles);
 
     cudaEvent_t ev_splat_start, ev_splat_stop;
     CUDA_CHECK(cudaEventCreate(&ev_splat_start));
     CUDA_CHECK(cudaEventCreate(&ev_splat_stop));
     CUDA_CHECK(cudaEventRecord(ev_splat_start));
 
-    {
-        int nblk = (num_hits + BLK - 1) / BLK;
-        splat_tent_kernel<<<nblk, BLK>>>(
-            d_hits, num_hits, config.num_sources, d_group_radii,
-            d_out_r, d_out_g, d_out_b, img_w, img_h);
-        CUDA_CHECK(cudaGetLastError());
-    }
+    splat_tiles_kernel<<<num_tiles, SPLAT_TILE_PX>>>(
+        d_hits, d_tile_offsets, d_tile_bins,
+        config.num_sources, d_group_radii,
+        d_out_r, d_out_g, d_out_b,
+        tiles_x, tiles_y, img_w, img_h);
+    CUDA_CHECK(cudaGetLastError());
 
     CUDA_CHECK(cudaEventRecord(ev_splat_stop));
     CUDA_CHECK(cudaEventSynchronize(ev_splat_stop));
 
     float splat_ms = 0;
     CUDA_CHECK(cudaEventElapsedTime(&splat_ms, ev_splat_start, ev_splat_stop));
-    printf("  GPU splat kernel: %.2f s (%.1f Mhit/s)\n",
-           splat_ms / 1000.0, num_hits / splat_ms / 1000.0);
+    printf("  GPU tile splat: %.2f s (%.1f Mhit/s)\n",
+           splat_ms / 1000.0, num_hits / std::max(splat_ms, 0.001f) / 1000.0);
 
     cudaEventDestroy(ev_splat_start);
     cudaEventDestroy(ev_splat_stop);
+    cudaFree(d_tile_offsets);
+    cudaFree(d_tile_bins);
 
     // ---- Step 5: download output images and add to host buffers ----
     {
