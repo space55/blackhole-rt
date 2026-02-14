@@ -13,6 +13,7 @@
 
 #include "ghost.h"
 #include "trace.h"
+#include "gpu_ghosts.h"
 
 #include <cstdio>
 #include <cmath>
@@ -269,23 +270,18 @@ void render_ghosts(const LensSystem &lens,
     printf("Sensor: %.2f × %.2f mm (at z = %.2f mm)\n",
            sensor_half_w * 2, sensor_half_h * 2, lens.sensor_z);
 
-    // Pre-filter ghost pairs
+    // Pre-filter ghost pairs (shared by GPU and CPU paths)
     std::vector<GhostPair> active_pairs;
-    std::vector<float> pair_area_boost; // per-pair area correction factor
+    std::vector<float> pair_area_boost;
     for (auto &p : pairs)
     {
-        // Skip pairs where either bounce surface has n1 ≈ n2 (air-to-air),
-        // since Fresnel reflectance is zero and the pair contributes nothing.
         auto ior_before_a = lens.ior_before(p.surf_a);
         auto ior_after_a = lens.surfaces[p.surf_a].ior;
         auto ior_before_b = lens.ior_before(p.surf_b);
         auto ior_after_b = lens.surfaces[p.surf_b].ior;
         if (std::abs(ior_before_a - ior_after_a) < 0.001f ||
             std::abs(ior_before_b - ior_after_b) < 0.001f)
-        {
-            // Air-to-air surface: zero reflectance, skip.
             continue;
-        }
 
         float est = estimate_ghost_intensity(lens, p.surf_a, p.surf_b, config);
         if (est >= config.min_intensity)
@@ -297,7 +293,6 @@ void render_ghosts(const LensSystem &lens,
                                               sensor_half_w, sensor_half_h,
                                               config);
             }
-
             active_pairs.push_back(p);
             pair_area_boost.push_back(boost);
         }
@@ -315,6 +310,83 @@ void render_ghosts(const LensSystem &lens,
                        pair_area_boost[i]);
         }
     }
+
+#ifdef FLARESIM_USE_CUDA
+    // ---- Try GPU path first ----
+    if (gpu_ghosts_available())
+    {
+        printf("\n=== GPU ghost rendering (CUDA) ===\n");
+
+        // Convert lens surfaces to flat GPU structs
+        std::vector<GPUSurface> gpu_surfaces(lens.num_surfaces());
+        for (int i = 0; i < lens.num_surfaces(); ++i)
+        {
+            const auto &s = lens.surfaces[i];
+            gpu_surfaces[i].radius = s.radius;
+            gpu_surfaces[i].thickness = s.thickness;
+            gpu_surfaces[i].ior = s.ior;
+            gpu_surfaces[i].abbe_v = s.abbe_v;
+            gpu_surfaces[i].semi_aperture = s.semi_aperture;
+            gpu_surfaces[i].coating = s.coating;
+            gpu_surfaces[i].is_stop = s.is_stop ? 1 : 0;
+            gpu_surfaces[i].z = s.z;
+        }
+
+        // Convert sources
+        std::vector<GPUBrightPixel> gpu_sources(sources.size());
+        for (size_t i = 0; i < sources.size(); ++i)
+        {
+            gpu_sources[i].angle_x = sources[i].angle_x;
+            gpu_sources[i].angle_y = sources[i].angle_y;
+            gpu_sources[i].r = sources[i].r;
+            gpu_sources[i].g = sources[i].g;
+            gpu_sources[i].b = sources[i].b;
+        }
+
+        // Convert ghost pairs
+        std::vector<GPUGhostPair> gpu_pairs(active_pairs.size());
+        for (size_t i = 0; i < active_pairs.size(); ++i)
+        {
+            gpu_pairs[i].surf_a = active_pairs[i].surf_a;
+            gpu_pairs[i].surf_b = active_pairs[i].surf_b;
+            gpu_pairs[i].area_boost = pair_area_boost[i];
+        }
+
+        // Fill config
+        GPUGhostConfig gcfg{};
+        gcfg.ray_grid = N;
+        gcfg.wavelengths[0] = config.wavelengths[0];
+        gcfg.wavelengths[1] = config.wavelengths[1];
+        gcfg.wavelengths[2] = config.wavelengths[2];
+        gcfg.gain = config.gain;
+        gcfg.sensor_half_w = sensor_half_w;
+        gcfg.sensor_half_h = sensor_half_h;
+        gcfg.front_R = front_R;
+        gcfg.start_z = start_z;
+        gcfg.ray_weight = ray_weight;
+        gcfg.img_width = width;
+        gcfg.img_height = height;
+        gcfg.num_surfaces = lens.num_surfaces();
+        gcfg.num_sources = (int)sources.size();
+        gcfg.num_pairs = (int)active_pairs.size();
+        gcfg.valid_grid_count = valid_grid_count;
+
+        if (render_ghosts_gpu(gpu_surfaces, gpu_sources, gpu_pairs,
+                              gcfg, out_r, out_g, out_b))
+        {
+            printf("=== GPU ghost rendering complete ===\n\n");
+            return; // success — skip CPU fallback
+        }
+
+        printf("GPU ghost rendering failed, falling back to CPU\n\n");
+    }
+    else
+    {
+        printf("No CUDA GPU detected, using CPU path\n");
+    }
+#endif // FLARESIM_USE_CUDA
+
+    // ---- CPU path (original or fallback) ----
     printf("Splat mode: per-source adaptive (collect-then-splat)\n");
 
     auto t0 = std::chrono::steady_clock::now();
