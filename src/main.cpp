@@ -58,8 +58,7 @@ int main(int argc, char *argv[])
         cfg.disk_flat_mode);
 
     printf("Black hole: M=%.1f, a=%.2f, r+=%.4f, r_isco=%.4f\n",
-           pp.bh_mass, pp.bh_spin, pp.r_plus, pp.
-        );
+           pp.bh_mass, pp.bh_spin, pp.r_plus, pp.disk_inner_r);
 
     // --- Derived constants from config -----------------------------------
     const int out_width = cfg.output_width;
@@ -559,6 +558,120 @@ int main(int argc, char *argv[])
 
         printf("Bloom applied (kernel radius = %d px)\n", kernel_r);
     }
+
+    // =====================================================================
+    // Write optional HDR output (raw linear, pre-tonemap)
+    // =====================================================================
+    if (!cfg.hdr_output.empty())
+    {
+        std::vector<float> hdr_float(num_pixels * 3);
+#pragma omp parallel for
+        for (int i = 0; i < (int)num_pixels; ++i)
+        {
+            dvec3 combined = hdr_disk[i] + hdr_sky[i] * cfg.sky_brightness;
+            hdr_float[i * 3 + 0] = static_cast<float>(combined.x);
+            hdr_float[i * 3 + 1] = static_cast<float>(combined.y);
+            hdr_float[i * 3 + 2] = static_cast<float>(combined.z);
+        }
+        if (stbi_write_hdr(cfg.hdr_output.c_str(), out_width, out_height, 3, hdr_float.data()))
+            printf("Wrote HDR: %s\n", cfg.hdr_output.c_str());
+        else
+            printf("ERROR: failed to write HDR: %s\n", cfg.hdr_output.c_str());
+    }
+
+    // =====================================================================
+    // Write optional OpenEXR output (float32, multi-layer, ZIP compressed)
+    // =====================================================================
+#ifdef HAS_OPENEXR
+    if (!cfg.exr_output.empty())
+    {
+        try
+        {
+            Imf::Header header(out_width, out_height);
+            header.compression() = Imf::ZIP_COMPRESSION;
+
+            // Combined RGB (disk + sky) — the "beauty pass"
+            header.channels().insert("R", Imf::Channel(Imf::FLOAT));
+            header.channels().insert("G", Imf::Channel(Imf::FLOAT));
+            header.channels().insert("B", Imf::Channel(Imf::FLOAT));
+            header.channels().insert("A", Imf::Channel(Imf::FLOAT));
+
+            // Separate disk emission layer (with its own alpha)
+            header.channels().insert("disk.R", Imf::Channel(Imf::FLOAT));
+            header.channels().insert("disk.G", Imf::Channel(Imf::FLOAT));
+            header.channels().insert("disk.B", Imf::Channel(Imf::FLOAT));
+            header.channels().insert("disk.A", Imf::Channel(Imf::FLOAT));
+
+            // Separate sky layer (brightness-scaled)
+            header.channels().insert("sky.R", Imf::Channel(Imf::FLOAT));
+            header.channels().insert("sky.G", Imf::Channel(Imf::FLOAT));
+            header.channels().insert("sky.B", Imf::Channel(Imf::FLOAT));
+
+            // Build float32 scanline buffers
+            std::vector<float> exr_r(num_pixels), exr_g(num_pixels), exr_b(num_pixels);
+            std::vector<float> exr_a(num_pixels);
+            std::vector<float> exr_disk_r(num_pixels), exr_disk_g(num_pixels), exr_disk_b(num_pixels);
+            std::vector<float> exr_disk_a(num_pixels);
+            std::vector<float> exr_sky_r(num_pixels), exr_sky_g(num_pixels), exr_sky_b(num_pixels);
+
+#pragma omp parallel for
+            for (int i = 0; i < (int)num_pixels; ++i)
+            {
+                dvec3 sky_scaled = hdr_sky[i] * cfg.sky_brightness;
+                dvec3 combined = hdr_disk[i] + sky_scaled;
+
+                exr_r[i] = static_cast<float>(combined.x);
+                exr_g[i] = static_cast<float>(combined.y);
+                exr_b[i] = static_cast<float>(combined.z);
+                exr_a[i] = 1.0f; // beauty pass is fully composited — always opaque
+
+                exr_disk_r[i] = static_cast<float>(hdr_disk[i].x);
+                exr_disk_g[i] = static_cast<float>(hdr_disk[i].y);
+                exr_disk_b[i] = static_cast<float>(hdr_disk[i].z);
+                exr_disk_a[i] = static_cast<float>(hdr_alpha[i]);
+
+                exr_sky_r[i] = static_cast<float>(sky_scaled.x);
+                exr_sky_g[i] = static_cast<float>(sky_scaled.y);
+                exr_sky_b[i] = static_cast<float>(sky_scaled.z);
+            }
+
+            const size_t stride = sizeof(float);
+            const size_t scanline = sizeof(float) * out_width;
+
+            Imf::FrameBuffer fb;
+            fb.insert("R", Imf::Slice(Imf::FLOAT, (char *)exr_r.data(), stride, scanline));
+            fb.insert("G", Imf::Slice(Imf::FLOAT, (char *)exr_g.data(), stride, scanline));
+            fb.insert("B", Imf::Slice(Imf::FLOAT, (char *)exr_b.data(), stride, scanline));
+            fb.insert("A", Imf::Slice(Imf::FLOAT, (char *)exr_a.data(), stride, scanline));
+
+            fb.insert("disk.R", Imf::Slice(Imf::FLOAT, (char *)exr_disk_r.data(), stride, scanline));
+            fb.insert("disk.G", Imf::Slice(Imf::FLOAT, (char *)exr_disk_g.data(), stride, scanline));
+            fb.insert("disk.B", Imf::Slice(Imf::FLOAT, (char *)exr_disk_b.data(), stride, scanline));
+            fb.insert("disk.A", Imf::Slice(Imf::FLOAT, (char *)exr_disk_a.data(), stride, scanline));
+
+            fb.insert("sky.R", Imf::Slice(Imf::FLOAT, (char *)exr_sky_r.data(), stride, scanline));
+            fb.insert("sky.G", Imf::Slice(Imf::FLOAT, (char *)exr_sky_g.data(), stride, scanline));
+            fb.insert("sky.B", Imf::Slice(Imf::FLOAT, (char *)exr_sky_b.data(), stride, scanline));
+
+            Imf::OutputFile file(cfg.exr_output.c_str(), header);
+            file.setFrameBuffer(fb);
+            file.writePixels(out_height);
+
+            printf("Wrote EXR: %s\n", cfg.exr_output.c_str());
+        }
+        catch (const std::exception &e)
+        {
+            printf("ERROR: failed to write EXR: %s (%s)\n",
+                   cfg.exr_output.c_str(), e.what());
+        }
+    }
+#else
+    if (!cfg.exr_output.empty())
+    {
+        printf("WARNING: EXR output requested but OpenEXR was not found at build time.\n");
+        printf("         Install OpenEXR (brew install openexr) and reconfigure with cmake.\n");
+    }
+#endif
 
     // =====================================================================
     // Tone mapping + quantization
