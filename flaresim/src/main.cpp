@@ -72,6 +72,10 @@ struct Params
     bool ghost_normalize = true;   // per-pair area correction
     float max_area_boost = 100.0f; // cap on area correction factor
 
+    // Ghost smoothing
+    float ghost_blur = 0.003f; // blur radius as fraction of image diagonal (0 = off)
+    int ghost_blur_passes = 3; // box-blur passes (3 ≈ Gaussian)
+
     std::string tga_file;  // optional TGA output path
     std::string debug_tga; // optional debug TGA: only bright pixels above threshold
 };
@@ -108,6 +112,9 @@ static void print_usage(const char *prog)
     printf("\nGhost normalization (defocus compensation):\n");
     printf("  ghost_normalize  1 = per-pair area correction (default: 1)\n");
     printf("  max_area_boost   Cap on defocus boost factor (default: 100)\n");
+    printf("\nGhost smoothing (smooth sparse ray splats):\n");
+    printf("  ghost_blur       Blur radius as frac of diagonal; 0=off (default: 0.003)\n");
+    printf("  ghost_blur_passes  Box-blur passes, 1-5 (default: 3)\n");
     printf("\nAll keys can also be passed as CLI overrides: --key value\n");
     printf("  e.g.: %s flare.conf --flare_gain 2000 --threshold 2.0\n", prog);
     printf("\n  --help          Print this help\n");
@@ -215,6 +222,10 @@ static bool apply_params(const std::unordered_map<std::string, std::string> &kv,
         if (it != kv.end())
             p.ghost_normalize = (std::atoi(it->second.c_str()) != 0);
     }
+
+    // Ghost smoothing
+    get_float("ghost_blur", p.ghost_blur);
+    get_int("ghost_blur_passes", p.ghost_blur_passes);
 
     return true;
 }
@@ -969,6 +980,32 @@ int main(int argc, char *argv[])
     render_ghosts(lens, sources, fov_h, fov_v,
                   flare_r.data(), flare_g.data(), flare_b.data(),
                   img.width, img.height, gcfg);
+
+    // ---- Ghost blur (smooth sparse ray splats) ----
+    if (params.ghost_blur > 0)
+    {
+        const float diag = std::sqrt((float)(img.width * img.width + img.height * img.height));
+        int kernel = std::max((int)(params.ghost_blur * diag), 1);
+        float sigma = kernel / 3.0f;
+        int passes = std::clamp(params.ghost_blur_passes, 1, 5);
+
+        std::vector<int> box_radii;
+        compute_box_radii(sigma, passes, box_radii);
+
+        printf("Ghost blur: radius=%d px (sigma=%.1f), %d passes\n",
+               kernel, sigma, passes);
+
+        std::vector<float> tmp_r(np), tmp_g(np), tmp_b(np);
+        for (int pass = 0; pass < passes; ++pass)
+        {
+            box_blur_pass(flare_r, flare_g, flare_b,
+                          tmp_r, tmp_g, tmp_b,
+                          img.width, img.height, box_radii[pass]);
+            std::swap(flare_r, tmp_r);
+            std::swap(flare_g, tmp_g);
+            std::swap(flare_b, tmp_b);
+        }
+    }
 
     // ---- Flare stats ----
     {

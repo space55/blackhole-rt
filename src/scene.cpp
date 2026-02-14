@@ -110,6 +110,7 @@ bool load_scene_config(const char *path, scene_config_s &cfg)
     get_double("escape_radius", cfg.escape_radius);
 
     // Disk geometry
+    get_double("disk_inner_r", cfg.disk_inner_r);
     get_double("disk_outer_r", cfg.disk_outer_r);
     get_double("disk_thickness", cfg.disk_thickness);
     get_double("disk_density", cfg.disk_density);
@@ -165,8 +166,8 @@ void print_scene_config(const scene_config_s &cfg)
     printf("  Black hole: M=%.3f  a=%.4f\n", cfg.bh_mass, cfg.bh_spin);
     printf("  Integration: dt=%.3f  max_affine=%.1f  escape_r=%.1f\n",
            cfg.base_dt, cfg.max_affine, cfg.escape_radius);
-    printf("  Disk:      outer_r=%.1f  thickness=%.2f  density=%.1f  opacity=%.2f\n",
-           cfg.disk_outer_r, cfg.disk_thickness, cfg.disk_density, cfg.disk_opacity);
+    printf("  Disk:      inner_r=%.2f  outer_r=%.1f  thickness=%.2f  density=%.1f  opacity=%.2f\n",
+           cfg.disk_inner_r, cfg.disk_outer_r, cfg.disk_thickness, cfg.disk_density, cfg.disk_opacity);
     printf("  Disk look: emission_boost=%.1f  color_variation=%.2f  turbulence=%.2f  flat_mode=%d\n",
            cfg.disk_emission_boost, cfg.disk_color_variation, cfg.disk_turbulence, cfg.disk_flat_mode);
     printf("  Tonemap:   compression=%.2f  exposure=%.2f\n", cfg.tonemap_compression, cfg.exposure);

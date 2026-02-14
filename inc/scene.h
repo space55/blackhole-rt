@@ -45,6 +45,7 @@ struct scene_config_s
     double escape_radius = 50.0;
 
     // Accretion disk geometry
+    double disk_inner_r = -1.0; // inner edge in M; -1 = auto (ISCO)
     double disk_outer_r = 20.0;
     double disk_thickness = 0.5;
     double disk_density = 20.0;

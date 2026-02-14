@@ -257,39 +257,56 @@ void render_ghosts(const LensSystem &lens,
 
     auto t0 = std::chrono::steady_clock::now();
 
-    // Process each ghost pair
-    for (size_t pi = 0; pi < active_pairs.size(); ++pi)
+    // ====================================================================
+    // Parallel over ghost pairs
+    //
+    // Each thread gets its own full-image accumulation buffer, allocated
+    // ONCE before the loop.  Threads process different ghost pairs via
+    // dynamic scheduling, iterating over all bright sources within each
+    // pair.  This eliminates the old pattern of:
+    //   1) per-pair buffer allocation/deallocation (hundreds of MB churn)
+    //   2) per-pair thread-barrier overhead
+    //   3) per-pair serial reduction
+    // and provides much better load balancing across pairs with wildly
+    // different hit rates.
+    // ====================================================================
+
+    int num_threads = 1;
+#ifdef _OPENMP
+    num_threads = omp_get_max_threads();
+#endif
+
+    // Pre-allocate per-thread accumulation buffers (ONE allocation total)
+    std::vector<std::vector<float>> tbuf_r(num_threads, std::vector<float>(num_px, 0));
+    std::vector<std::vector<float>> tbuf_g(num_threads, std::vector<float>(num_px, 0));
+    std::vector<std::vector<float>> tbuf_b(num_threads, std::vector<float>(num_px, 0));
+
+    // Per-pair stats (written from threads, read after parallel section)
+    std::vector<long long> pair_hits(active_pairs.size(), 0);
+    std::vector<long long> pair_attempts(active_pairs.size(), 0);
+    std::vector<double> pair_time(active_pairs.size(), 0);
+
+    printf("Rendering %zu ghost pairs × %zu sources across %d thread(s)...\n",
+           active_pairs.size(), sources.size(), num_threads);
+    fflush(stdout);
+
+#pragma omp parallel for schedule(dynamic, 1)
+    for (int pi = 0; pi < (int)active_pairs.size(); ++pi)
     {
+        int tid = 0;
+#ifdef _OPENMP
+        tid = omp_get_thread_num();
+#endif
         int a = active_pairs[pi].surf_a;
         int b = active_pairs[pi].surf_b;
         float area_boost = pair_area_boost[pi];
 
-        printf("  [%zu/%zu] Ghost pair (%d, %d) [area ×%.1f] ...",
-               pi + 1, active_pairs.size(), a, b, area_boost);
-        fflush(stdout);
-
         auto tp0 = std::chrono::steady_clock::now();
+        long long hits = 0, attempts = 0;
 
-        // Per-thread accumulation buffers to avoid atomic operations
-        int num_threads = 1;
-#ifdef _OPENMP
-        num_threads = omp_get_max_threads();
-#endif
-        std::vector<std::vector<float>> tbuf_r(num_threads, std::vector<float>(num_px, 0));
-        std::vector<std::vector<float>> tbuf_g(num_threads, std::vector<float>(num_px, 0));
-        std::vector<std::vector<float>> tbuf_b(num_threads, std::vector<float>(num_px, 0));
-
-        // Per-thread hit counters for diagnostics
-        std::vector<long long> thread_hits(num_threads, 0);
-        std::vector<long long> thread_attempts(num_threads, 0);
-
-#pragma omp parallel for schedule(dynamic, 4)
+        // Process every bright source for this ghost pair
         for (int si = 0; si < (int)sources.size(); ++si)
         {
-            int tid = 0;
-#ifdef _OPENMP
-            tid = omp_get_thread_num();
-#endif
             const BrightPixel &src = sources[si];
 
             // Per-source RNG for stratified jitter (seeded by source index
@@ -321,13 +338,13 @@ void render_ghosts(const LensSystem &lens,
                     // Trace each wavelength independently (chromatic dispersion)
                     for (int ch = 0; ch < 3; ++ch)
                     {
-                        ++thread_attempts[tid];
+                        ++attempts;
                         TraceResult res = trace_ghost_ray(ray, lens, a, b,
                                                           config.wavelengths[ch]);
                         if (!res.valid)
                             continue;
 
-                        ++thread_hits[tid];
+                        ++hits;
 
                         // Map sensor position to pixel coordinates
                         float px = (res.position.x / (2.0f * sensor_half_w) + 0.5f) * width;
@@ -351,32 +368,48 @@ void render_ghosts(const LensSystem &lens,
             }
         }
 
-        // Reduce thread buffers into output
-        for (int t = 0; t < num_threads; ++t)
-        {
-            for (size_t i = 0; i < num_px; ++i)
-            {
-                out_r[i] += tbuf_r[t][i];
-                out_g[i] += tbuf_g[t][i];
-                out_b[i] += tbuf_b[t][i];
-            }
-        }
-
-        long long total_hits = 0, total_attempts = 0;
-        for (int t = 0; t < num_threads; ++t)
-        {
-            total_hits += thread_hits[t];
-            total_attempts += thread_attempts[t];
-        }
-
         auto tp1 = std::chrono::steady_clock::now();
-        printf(" %.1f s  (%lld/%lld rays hit sensor, %.1f%%)\n",
-               std::chrono::duration<double>(tp1 - tp0).count(),
-               total_hits, total_attempts,
-               total_attempts > 0 ? 100.0 * total_hits / total_attempts : 0.0);
+        pair_hits[pi] = hits;
+        pair_attempts[pi] = attempts;
+        pair_time[pi] = std::chrono::duration<double>(tp1 - tp0).count();
+    }
+
+    // Print per-pair diagnostics (after parallel section completes)
+    for (size_t pi = 0; pi < active_pairs.size(); ++pi)
+    {
+        printf("  [%zu/%zu] Ghost pair (%d, %d) [area ×%.1f]  %.1f s  "
+               "(%lld/%lld rays, %.1f%%)\n",
+               pi + 1, active_pairs.size(),
+               active_pairs[pi].surf_a, active_pairs[pi].surf_b,
+               pair_area_boost[pi], pair_time[pi],
+               pair_hits[pi], pair_attempts[pi],
+               pair_attempts[pi] > 0
+                   ? 100.0 * pair_hits[pi] / pair_attempts[pi]
+                   : 0.0);
+    }
+
+    // Reduce per-thread buffers into output (parallelised over pixels)
+#pragma omp parallel for
+    for (int i = 0; i < (int)num_px; ++i)
+    {
+        for (int t = 0; t < num_threads; ++t)
+        {
+            out_r[i] += tbuf_r[t][i];
+            out_g[i] += tbuf_g[t][i];
+            out_b[i] += tbuf_b[t][i];
+        }
     }
 
     auto t1 = std::chrono::steady_clock::now();
-    printf("Ghost rendering total: %.1f s\n",
-           std::chrono::duration<double>(t1 - t0).count());
+
+    long long total_hits = 0, total_attempts = 0;
+    for (size_t pi = 0; pi < active_pairs.size(); ++pi)
+    {
+        total_hits += pair_hits[pi];
+        total_attempts += pair_attempts[pi];
+    }
+    printf("Ghost rendering total: %.1f s  (%lld/%lld rays, %.1f%%)\n",
+           std::chrono::duration<double>(t1 - t0).count(),
+           total_hits, total_attempts,
+           total_attempts > 0 ? 100.0 * total_hits / total_attempts : 0.0);
 }

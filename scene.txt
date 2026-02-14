@@ -47,6 +47,9 @@ max_affine      = 200.0         # max affine parameter (ray lifetime)
 escape_radius   = 75.0          # rays beyond this radius are considered escaped
 
 # --- Accretion disk geometry ------------------------------------------------
+disk_inner_r    = -1            # inner edge in M; -1 = auto (ISCO for current spin)
+                                #   ISCO ≈ 6M for a=0, ≈ 1.24M for a=0.999
+                                #   Set manually to e.g. 3.0 to pull the disk closer
 disk_outer_r    = 20.0          # outer edge in M
 disk_thickness  = 0.5           # half-thickness scale height
 disk_density    = 20.0          # base density ρ₀

@@ -24,7 +24,8 @@ struct PhysicsParams
     double r_plus; // event horizon radius (precomputed)
 
     // Disk geometry
-    double disk_inner_r; // ISCO (or custom inner edge)
+    double disk_inner_r; // visible inner edge (may differ from ISCO)
+    double disk_isco;    // physical ISCO — used for temperature profile
     double disk_outer_r;
     double disk_thickness; // half-thickness scale height at reference radius
     double disk_r_ref;     // sqrt(inner_r * outer_r), precomputed
@@ -463,7 +464,7 @@ BH_FUNC inline double disk_density(const dvec3 &pos, double r_ks,
         return 0.0;
 
     const double height = pos.y;
-    const double radial = pow(dens_inner / r_ks, 1.5);
+    const double radial = pow(pp.disk_isco / r_ks, 1.5);
     const double vertical = exp(-0.5 * (height * height) / (warped_h * warped_h));
 
     double outer_fade = 1.0;
@@ -499,6 +500,7 @@ BH_FUNC inline double disk_density(const dvec3 &pos, double r_ks,
 BH_FUNC inline double disk_temperature(double r_ks, const PhysicsParams &pp)
 {
     const double inner_r = pp.disk_inner_r;
+    const double isco = pp.disk_isco; // physical ISCO for temperature profile
     const double outer_r = pp.disk_outer_r;
 
     // In flat mode: extend temperature profile inside ISCO and further past outer edge
@@ -515,7 +517,8 @@ BH_FUNC inline double disk_temperature(double r_ks, const PhysicsParams &pp)
         return 0.6 * t * t * t;
     }
 
-    const double x_ratio = r_ks / inner_r;
+    // Novikov-Thorne profile always references the physical ISCO
+    const double x_ratio = r_ks / isco;
     const double factor = (1.0 / (x_ratio * x_ratio * x_ratio)) *
                           fmax(1.0 - sqrt(1.0 / x_ratio), 0.0);
     const double peak_x = 49.0 / 36.0;
@@ -1067,16 +1070,18 @@ inline PhysicsParams make_physics_params(double M, double a,
                                          double disk_density, double disk_opacity,
                                          double emission_boost, double color_variation,
                                          double turbulence, double time,
-                                         int flat_mode = 0)
+                                         int flat_mode = 0,
+                                         double disk_inner_override = -1.0)
 {
     PhysicsParams pp = {};
     pp.bh_mass = M;
     pp.bh_spin = a;
     pp.r_plus = compute_event_horizon(M, a);
-    pp.disk_inner_r = compute_isco(M, a);
+    pp.disk_isco = compute_isco(M, a);
+    pp.disk_inner_r = (disk_inner_override > 0) ? disk_inner_override : pp.disk_isco;
     pp.disk_outer_r = disk_outer_r;
     pp.disk_thickness = disk_thickness;
-    pp.disk_r_ref = sqrt(pp.disk_inner_r * disk_outer_r);
+    pp.disk_r_ref = sqrt(pp.disk_isco * disk_outer_r);
     pp.disk_density0 = disk_density;
     pp.disk_opacity0 = disk_opacity;
     pp.disk_emission_boost = emission_boost;
