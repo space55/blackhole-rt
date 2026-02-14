@@ -342,21 +342,25 @@ BH_FUNC inline double disk_stipple_factor(const dvec3 &pos, double r_ks,
     if (r_ks < stip_inner || r_ks > stip_outer)
         return 1.0;
 
-    const double phi = atan2(pos.z, pos.x);
-    const double log_r = log(fmax(r_ks, 1e-6));
     const double y_h = (warped_h > 1e-12) ? (pos.y / warped_h) : 0.0;
 
-    // Keplerian rotation so particles orbit with the disk
+    // Keplerian rotation so particles orbit with the disk.
+    // Use rotated Cartesian coordinates instead of atan2(phi) to avoid
+    // the hard seam at the ±π wrap-around of atan2.
     const double omega = 1.0 / (r_ks * sqrt(r_ks));
-    const double rot_phi = phi + pp.disk_time * omega;
+    const double rot_angle = pp.disk_time * omega;
+    const double cos_rot = cos(rot_angle);
+    const double sin_rot = sin(rot_angle);
+    const double rx = pos.x * cos_rot - pos.z * sin_rot;
+    const double rz = pos.x * sin_rot + pos.z * cos_rot;
 
     // Multi-octave thresholded value noise → discrete specks at each scale
     double particle = 0.0;
 
     // Octave 1: medium specks (dominant visible particle texture)
     {
-        double u = rot_phi * 25.0 / (2.0 * M_PI);
-        double v = log_r * 35.0;
+        double u = rx * 4.0;
+        double v = rz * 4.0;
         double w = y_h * 4.0;
         double n = bh_value_noise(u, v, w);
         // Sharp threshold: only noise peaks become visible specks
@@ -366,8 +370,8 @@ BH_FUNC inline double disk_stipple_factor(const dvec3 &pos, double r_ks,
 
     // Octave 2: fine dust (dense small particles)
     {
-        double u = rot_phi * 65.0 / (2.0 * M_PI) + 7.3;
-        double v = log_r * 90.0 + 3.1;
+        double u = rx * 10.0 + 7.3;
+        double v = rz * 10.0 + 3.1;
         double w = y_h * 10.0 + 1.7;
         double n = bh_value_noise(u, v, w);
         double spec = dclamp((n - 0.50) / 0.16, 0.0, 1.0);
@@ -376,8 +380,8 @@ BH_FUNC inline double disk_stipple_factor(const dvec3 &pos, double r_ks,
 
     // Octave 3: coarse bright clumps (sparse, large, eye-catching)
     {
-        double u = rot_phi * 10.0 / (2.0 * M_PI) + 2.9;
-        double v = log_r * 14.0 + 5.7;
+        double u = rx * 1.5 + 2.9;
+        double v = rz * 1.5 + 5.7;
         double w = y_h * 2.0 + 0.4;
         double n = bh_value_noise(u, v, w);
         double spec = dclamp((n - 0.62) / 0.10, 0.0, 1.0);
