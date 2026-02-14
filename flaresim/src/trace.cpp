@@ -9,6 +9,14 @@
 #include <cstdio>
 #include <algorithm>
 
+// Fast normalize: avoids the branch and second divide in Vec3f::normalized().
+static inline Vec3f fast_normalize(const Vec3f &v)
+{
+    float l2 = v.x * v.x + v.y * v.y + v.z * v.z;
+    float inv = 1.0f / std::sqrt(l2); // -ffast-math turns this into rsqrt
+    return {v.x * inv, v.y * inv, v.z * inv};
+}
+
 // ---------------------------------------------------------------------------
 // Intersect a ray with a lens surface.
 //
@@ -111,7 +119,7 @@ static bool refract_direction(const Vec3f &dir, const Vec3f &normal,
         return false; // TIR
 
     float cos_t = std::sqrt(1.0f - sin2_t);
-    out_dir = (dir * n_ratio + normal * (n_ratio * cos_i - cos_t)).normalized();
+    out_dir = fast_normalize(dir * n_ratio + normal * (n_ratio * cos_i - cos_t));
     return true;
 }
 
@@ -121,7 +129,7 @@ static bool refract_direction(const Vec3f &dir, const Vec3f &normal,
 
 static Vec3f reflect_direction(const Vec3f &dir, const Vec3f &normal)
 {
-    return (dir - normal * (2.0f * dot(dir, normal))).normalized();
+    return fast_normalize(dir - normal * (2.0f * dot(dir, normal)));
 }
 
 // ---------------------------------------------------------------------------
@@ -130,10 +138,11 @@ static Vec3f reflect_direction(const Vec3f &dir, const Vec3f &normal)
 // Three-phase sequential trace with reflections at bounce_a and bounce_b.
 // ---------------------------------------------------------------------------
 
-TraceResult trace_ghost_ray(Ray ray, const LensSystem &lens,
+TraceResult trace_ghost_ray(const Ray &ray_in, const LensSystem &lens,
                             int bounce_a, int bounce_b,
                             float lambda_nm)
 {
+    Ray ray = ray_in; // local mutable copy
     TraceResult result;
     result.valid = false;
     result.weight = 1.0f;

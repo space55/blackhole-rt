@@ -92,32 +92,20 @@ static inline void splat_tent(float *buf, int w, int h,
     int iy1 = std::min((int)std::ceil(py + radius), h - 1);
 
     float inv_r = 1.0f / radius;
-    float total_w = 0;
 
-    // First pass: sum weights for normalisation
+    // Analytical normalisation: the integral of a 2D tent over [-r,r]² = r².
+    // (Each 1D integral of max(0, 1-|x|/r) over [-r,r] = r, so 2D = r*r.)
+    float norm = value / (radius * radius);
+
     for (int y = iy0; y <= iy1; ++y)
     {
         float wy = std::max(1.0f - std::abs(y + 0.5f - py) * inv_r, 0.0f);
+        float wy_norm = wy * norm;
+        int row = y * w;
         for (int x = ix0; x <= ix1; ++x)
         {
             float wx = std::max(1.0f - std::abs(x + 0.5f - px) * inv_r, 0.0f);
-            total_w += wx * wy;
-        }
-    }
-
-    if (total_w < 1e-12f)
-        return;
-
-    float norm = value / total_w;
-
-    // Second pass: deposit
-    for (int y = iy0; y <= iy1; ++y)
-    {
-        float wy = std::max(1.0f - std::abs(y + 0.5f - py) * inv_r, 0.0f);
-        for (int x = ix0; x <= ix1; ++x)
-        {
-            float wx = std::max(1.0f - std::abs(x + 0.5f - px) * inv_r, 0.0f);
-            buf[y * w + x] += norm * wx * wy;
+            buf[row + x] += wy_norm * wx;
         }
     }
 }
@@ -246,15 +234,23 @@ void render_ghosts(const LensSystem &lens,
     size_t num_px = (size_t)width * height;
 
     // Pre-count valid grid samples (within circular aperture)
-    int valid_grid_count = 0;
+    // and build a lookup table of valid (u,v) coordinates so the inner
+    // loop avoids the branch and index arithmetic.
+    struct GridSample
+    {
+        float u, v;
+    };
+    std::vector<GridSample> grid_samples;
+    grid_samples.reserve(N * N);
     for (int gy = 0; gy < N; ++gy)
         for (int gx = 0; gx < N; ++gx)
         {
             float u = ((gx + 0.5f) / N) * 2.0f - 1.0f;
             float v = ((gy + 0.5f) / N) * 2.0f - 1.0f;
             if (u * u + v * v <= 1.0f)
-                ++valid_grid_count;
+                grid_samples.push_back({u, v});
         }
+    int valid_grid_count = (int)grid_samples.size();
 
     if (valid_grid_count == 0)
     {
@@ -332,6 +328,13 @@ void render_ghosts(const LensSystem &lens,
     int num_threads = 1;
 #ifdef _OPENMP
     num_threads = omp_get_max_threads();
+    // Cap threads to the number of work items (ghost pairs) — on large
+    // NUMA machines (e.g. 200+ cores), using more threads than pairs
+    // just wastes memory on per-thread splat buffers and causes remote
+    // NUMA access penalties.  This alone can be a 5-10× speedup.
+    if (num_threads > (int)active_pairs.size())
+        num_threads = std::max((int)active_pairs.size(), 1);
+    omp_set_num_threads(num_threads);
 #endif
 
     // Pre-allocate per-thread accumulation buffers (ONE allocation total)
@@ -373,6 +376,11 @@ void render_ghosts(const LensSystem &lens,
             int ch;
         };
 
+        // Pre-allocate hit buffer once per thread — max possible hits is
+        // grid_samples × 3 channels.  Reused across sources without heap alloc.
+        std::vector<SplatHit> hit_buf;
+        hit_buf.reserve((size_t)valid_grid_count * 3);
+
         // Process every bright source for this ghost pair
         for (int si = 0; si < (int)sources.size(); ++si)
         {
@@ -390,8 +398,7 @@ void render_ghosts(const LensSystem &lens,
                                  .normalized();
 
             // ---- Pass 1: trace all rays and collect hits ----
-            std::vector<SplatHit> hit_buf;
-            hit_buf.reserve(valid_grid_count);
+            hit_buf.clear(); // reuse capacity, no realloc
 
             // Track bounding box of hit positions (green channel only
             // to avoid chromatic dispersion inflating the extent)
@@ -399,54 +406,50 @@ void render_ghosts(const LensSystem &lens,
             float bbox_min_y = 1e30f, bbox_max_y = -1e30f;
             int green_hits = 0;
 
-            for (int gy = 0; gy < N; ++gy)
+            for (int gi = 0; gi < valid_grid_count; ++gi)
             {
-                for (int gx = 0; gx < N; ++gx)
+                // Stratified: jitter within cell, using pre-computed base (u,v)
+                float cell_size = 2.0f / N;
+                float u = grid_samples[gi].u + (jitter(rng) - 0.5f) * cell_size;
+                float v = grid_samples[gi].v + (jitter(rng) - 0.5f) * cell_size;
+
+                Ray ray;
+                ray.origin = Vec3f(u * front_R, v * front_R, start_z);
+                ray.dir = beam_dir;
+
+                // Trace each wavelength independently (chromatic dispersion)
+                for (int ch = 0; ch < 3; ++ch)
                 {
-                    // Stratified: random position within each grid cell
-                    float u = ((gx + jitter(rng)) / N) * 2.0f - 1.0f;
-                    float v = ((gy + jitter(rng)) / N) * 2.0f - 1.0f;
-                    if (u * u + v * v > 1.0f)
+                    ++attempts;
+                    TraceResult res = trace_ghost_ray(ray, lens, a, b,
+                                                      config.wavelengths[ch]);
+                    if (!res.valid)
                         continue;
 
-                    Ray ray;
-                    ray.origin = Vec3f(u * front_R, v * front_R, start_z);
-                    ray.dir = beam_dir;
+                    ++hits;
 
-                    // Trace each wavelength independently (chromatic dispersion)
-                    for (int ch = 0; ch < 3; ++ch)
+                    // Map sensor position to pixel coordinates
+                    float px = (res.position.x / (2.0f * sensor_half_w) + 0.5f) * width;
+                    float py = (res.position.y / (2.0f * sensor_half_h) + 0.5f) * height;
+
+                    // Source intensity for this channel
+                    float src_i = (ch == 0) ? src.r : (ch == 1) ? src.g
+                                                                : src.b;
+                    float contribution = src_i * res.weight * ray_weight * config.gain * area_boost;
+
+                    if (contribution < 1e-12f)
+                        continue;
+
+                    hit_buf.push_back({px, py, contribution, ch});
+
+                    // Update bounding box from green channel
+                    if (ch == 1)
                     {
-                        ++attempts;
-                        TraceResult res = trace_ghost_ray(ray, lens, a, b,
-                                                          config.wavelengths[ch]);
-                        if (!res.valid)
-                            continue;
-
-                        ++hits;
-
-                        // Map sensor position to pixel coordinates
-                        float px = (res.position.x / (2.0f * sensor_half_w) + 0.5f) * width;
-                        float py = (res.position.y / (2.0f * sensor_half_h) + 0.5f) * height;
-
-                        // Source intensity for this channel
-                        float src_i = (ch == 0) ? src.r : (ch == 1) ? src.g
-                                                                    : src.b;
-                        float contribution = src_i * res.weight * ray_weight * config.gain * area_boost;
-
-                        if (contribution < 1e-12f)
-                            continue;
-
-                        hit_buf.push_back({px, py, contribution, ch});
-
-                        // Update bounding box from green channel
-                        if (ch == 1)
-                        {
-                            bbox_min_x = std::min(bbox_min_x, px);
-                            bbox_max_x = std::max(bbox_max_x, px);
-                            bbox_min_y = std::min(bbox_min_y, py);
-                            bbox_max_y = std::max(bbox_max_y, py);
-                            ++green_hits;
-                        }
+                        bbox_min_x = std::min(bbox_min_x, px);
+                        bbox_max_x = std::max(bbox_max_x, px);
+                        bbox_min_y = std::min(bbox_min_y, py);
+                        bbox_max_y = std::max(bbox_max_y, py);
+                        ++green_hits;
                     }
                 }
             }

@@ -532,7 +532,7 @@ static void box_blur_pass(const std::vector<float> &src_r,
 
     std::vector<float> tmp_r(np), tmp_g(np), tmp_b(np);
 
-    // Horizontal pass
+    // Horizontal pass (rows are contiguous — cache friendly)
 #pragma omp parallel for
     for (int y = 0; y < height; ++y)
     {
@@ -565,35 +565,57 @@ static void box_blur_pass(const std::vector<float> &src_r,
         }
     }
 
-    // Vertical pass
-#pragma omp parallel for
-    for (int x = 0; x < width; ++x)
+    // Vertical pass — process in cache-friendly tiles.
+    // Instead of iterating one column at a time (stride = width, cache miss
+    // every pixel), we process horizontal strips of TILE_W columns together.
+    // This keeps the working set within a few cache lines per row.
+    constexpr int TILE_W = 64;
+#pragma omp parallel for schedule(dynamic, 1)
+    for (int x0 = 0; x0 < width; x0 += TILE_W)
     {
-        float sr = 0, sg = 0, sb = 0;
+        int x1 = std::min(x0 + TILE_W, width);
+        int tw = x1 - x0;
+
+        // Running sums for this tile strip
+        std::vector<float> sr(tw), sg(tw), sb(tw);
+
+        // Initialize running sums for y=0
+        for (int i = 0; i < tw; ++i)
+            sr[i] = sg[i] = sb[i] = 0;
         for (int k = -radius; k <= radius; ++k)
         {
             int sy = std::clamp(k, 0, height - 1);
-            sr += tmp_r[sy * width + x];
-            sg += tmp_g[sy * width + x];
-            sb += tmp_b[sy * width + x];
+            for (int i = 0; i < tw; ++i)
+            {
+                int idx = sy * width + x0 + i;
+                sr[i] += tmp_r[idx];
+                sg[i] += tmp_g[idx];
+                sb[i] += tmp_b[idx];
+            }
         }
-        dst_r[x] = sr * inv_w;
-        dst_g[x] = sg * inv_w;
-        dst_b[x] = sb * inv_w;
+        for (int i = 0; i < tw; ++i)
+        {
+            int idx = x0 + i;
+            dst_r[idx] = sr[i] * inv_w;
+            dst_g[idx] = sg[i] * inv_w;
+            dst_b[idx] = sb[i] * inv_w;
+        }
 
+        // Slide down rows
         for (int y = 1; y < height; ++y)
         {
-            int add = std::min(y + radius, height - 1);
-            sr += tmp_r[add * width + x];
-            sg += tmp_g[add * width + x];
-            sb += tmp_b[add * width + x];
-            int rem = std::clamp(y - radius - 1, 0, height - 1);
-            sr -= tmp_r[rem * width + x];
-            sg -= tmp_g[rem * width + x];
-            sb -= tmp_b[rem * width + x];
-            dst_r[y * width + x] = sr * inv_w;
-            dst_g[y * width + x] = sg * inv_w;
-            dst_b[y * width + x] = sb * inv_w;
+            int add_row = std::min(y + radius, height - 1);
+            int rem_row = std::clamp(y - radius - 1, 0, height - 1);
+            for (int i = 0; i < tw; ++i)
+            {
+                int col = x0 + i;
+                sr[i] += tmp_r[add_row * width + col] - tmp_r[rem_row * width + col];
+                sg[i] += tmp_g[add_row * width + col] - tmp_g[rem_row * width + col];
+                sb[i] += tmp_b[add_row * width + col] - tmp_b[rem_row * width + col];
+                dst_r[y * width + col] = sr[i] * inv_w;
+                dst_g[y * width + col] = sg[i] * inv_w;
+                dst_b[y * width + col] = sb[i] * inv_w;
+            }
         }
     }
 }

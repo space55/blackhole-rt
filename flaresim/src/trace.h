@@ -33,6 +33,6 @@ bool intersect_surface(const Ray &ray, const Surface &surf,
 // reflectance calculations.
 //
 // Requires: 0 <= bounce_a < bounce_b < lens.num_surfaces()
-TraceResult trace_ghost_ray(Ray ray, const LensSystem &lens,
+TraceResult trace_ghost_ray(const Ray &ray, const LensSystem &lens,
                             int bounce_a, int bounce_b,
                             float lambda_nm);
