@@ -41,24 +41,24 @@ struct GPUGhostPair
 // Per-ray trace result written by the GPU kernel
 struct GPURayHit
 {
-    float px, py;  // pixel coordinates on sensor
-    float value;   // contribution (source intensity × Fresnel × gain × ...)
-    int channel;   // 0=R, 1=G, 2=B
+    float px, py;   // pixel coordinates on sensor
+    float value;    // contribution (source intensity × Fresnel × gain × ...)
+    int channel;    // 0=R, 1=G, 2=B
     int source_idx; // which bright source (for adaptive splat grouping)
-    int pair_idx;  // which ghost pair
+    int pair_idx;   // which ghost pair
 };
 
 // Configuration passed to the GPU kernel
 struct GPUGhostConfig
 {
-    int ray_grid;            // N×N entrance pupil grid
-    float wavelengths[3];    // R, G, B in nm
-    float gain;              // ghost intensity multiplier
-    float sensor_half_w;     // sensor half-width in mm
-    float sensor_half_h;     // sensor half-height in mm
-    float front_R;           // entrance pupil radius
-    float start_z;           // z position for ray origins (before first surface)
-    float ray_weight;        // 1.0 / valid_grid_count
+    int ray_grid;         // N×N entrance pupil grid
+    float wavelengths[3]; // R, G, B in nm
+    float gain;           // ghost intensity multiplier
+    float sensor_half_w;  // sensor half-width in mm
+    float sensor_half_h;  // sensor half-height in mm
+    float front_R;        // entrance pupil radius
+    float start_z;        // z position for ray origins (before first surface)
+    float ray_weight;     // 1.0 / valid_grid_count
     int img_width, img_height;
     int num_surfaces;
     int num_sources;

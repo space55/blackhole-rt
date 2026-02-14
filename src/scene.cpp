@@ -132,11 +132,6 @@ bool load_scene_config(const char *path, scene_config_s &cfg)
     if (cfg.aa_samples < 1)
         cfg.aa_samples = 1;
 
-    // Bloom / lens flare
-    get_double("bloom_strength", cfg.bloom_strength);
-    get_double("bloom_threshold", cfg.bloom_threshold);
-    get_double("bloom_radius", cfg.bloom_radius);
-
     // Animation
     get_double("time", cfg.time);
 
@@ -173,8 +168,6 @@ void print_scene_config(const scene_config_s &cfg)
            cfg.disk_emission_boost, cfg.disk_color_variation, cfg.disk_turbulence, cfg.disk_stipple, cfg.disk_flat_mode);
     printf("  Tonemap:   compression=%.2f  exposure=%.2f\n", cfg.tonemap_compression, cfg.exposure);
     printf("  AA:        %dx%d = %d samples/pixel\n", cfg.aa_samples, cfg.aa_samples, cfg.aa_samples * cfg.aa_samples);
-    printf("  Bloom:     strength=%.2f  threshold=%.2f  radius=%.3f\n",
-           cfg.bloom_strength, cfg.bloom_threshold, cfg.bloom_radius);
     printf("  Animation: time=%.4f\n", cfg.time);
     printf("===========================\n");
 }

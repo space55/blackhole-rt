@@ -24,16 +24,16 @@
 // ============================================================================
 // CUDA error checking
 // ============================================================================
-#define CUDA_CHECK(call)                                                \
-    do                                                                  \
-    {                                                                   \
-        cudaError_t err = (call);                                       \
-        if (err != cudaSuccess)                                         \
-        {                                                               \
-            fprintf(stderr, "CUDA error at %s:%d: %s\n",               \
-                    __FILE__, __LINE__, cudaGetErrorString(err));        \
-            return false;                                               \
-        }                                                               \
+#define CUDA_CHECK(call)                                          \
+    do                                                            \
+    {                                                             \
+        cudaError_t err = (call);                                 \
+        if (err != cudaSuccess)                                   \
+        {                                                         \
+            fprintf(stderr, "CUDA error at %s:%d: %s\n",          \
+                    __FILE__, __LINE__, cudaGetErrorString(err)); \
+            return false;                                         \
+        }                                                         \
     } while (0)
 
 // ============================================================================
@@ -466,7 +466,8 @@ __global__ void ghost_trace_kernel(
         float px = (res.position.x / (2.0f * config.sensor_half_w) + 0.5f) * config.img_width;
         float py = (res.position.y / (2.0f * config.sensor_half_h) + 0.5f) * config.img_height;
 
-        float src_i = (ch == 0) ? src.r : (ch == 1) ? src.g : src.b;
+        float src_i = (ch == 0) ? src.r : (ch == 1) ? src.g
+                                                    : src.b;
         float contribution = src_i * res.weight * config.ray_weight *
                              config.gain * area_boost;
         if (contribution < 1e-12f)
@@ -506,10 +507,14 @@ static inline void h_splat_bilinear(float *buf, int w, int h,
     float w10 = fx * (1.0f - fy);
     float w01 = (1.0f - fx) * fy;
     float w11 = fx * fy;
-    if (x0 >= 0 && x0 < w && y0 >= 0 && y0 < h) buf[y0 * w + x0] += value * w00;
-    if (x1 >= 0 && x1 < w && y0 >= 0 && y0 < h) buf[y0 * w + x1] += value * w10;
-    if (x0 >= 0 && x0 < w && y1 >= 0 && y1 < h) buf[y1 * w + x0] += value * w01;
-    if (x1 >= 0 && x1 < w && y1 >= 0 && y1 < h) buf[y1 * w + x1] += value * w11;
+    if (x0 >= 0 && x0 < w && y0 >= 0 && y0 < h)
+        buf[y0 * w + x0] += value * w00;
+    if (x1 >= 0 && x1 < w && y0 >= 0 && y0 < h)
+        buf[y0 * w + x1] += value * w10;
+    if (x0 >= 0 && x0 < w && y1 >= 0 && y1 < h)
+        buf[y1 * w + x0] += value * w01;
+    if (x1 >= 0 && x1 < w && y1 >= 0 && y1 < h)
+        buf[y1 * w + x1] += value * w11;
 }
 
 static void h_splat_tent(float *buf, int w, int h,
@@ -734,8 +739,7 @@ bool render_ghosts_gpu(const std::vector<GPUSurface> &surfaces,
               {
                   long long ka = (long long)h_hits[a].pair_idx * num_sources_i + h_hits[a].source_idx;
                   long long kb = (long long)h_hits[b].pair_idx * num_sources_i + h_hits[b].source_idx;
-                  return ka < kb;
-              });
+                  return ka < kb; });
 
     // Process groups
     int gi = 0;
@@ -784,7 +788,8 @@ bool render_ghosts_gpu(const std::vector<GPUSurface> &surfaces,
         for (int k = gi; k < gj; ++k)
         {
             const GPURayHit &h = h_hits[indices[k]];
-            float *buf = (h.channel == 0) ? out_r : (h.channel == 1) ? out_g : out_b;
+            float *buf = (h.channel == 0) ? out_r : (h.channel == 1) ? out_g
+                                                                     : out_b;
             h_splat_tent(buf, img_w, img_h, h.px, h.py, h.value, adaptive_r);
         }
 
