@@ -21,6 +21,8 @@ if(ipo_supported)
     set(CMAKE_INTERPROCEDURAL_OPTIMIZATION TRUE)
 endif()
 
+configure_file("flaresim.conf" "flaresim.conf" COPYONLY)
+
 # --- Dependencies ---------------------------------------------------------
 find_package(OpenEXR 3 REQUIRED)
 find_package(OpenMP)

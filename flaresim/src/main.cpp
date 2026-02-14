@@ -22,6 +22,7 @@
 #include <fstream>
 #include <sstream>
 #include <unordered_map>
+#include <sys/stat.h>
 
 #include <OpenEXR/ImfInputFile.h>
 #include <OpenEXR/ImfOutputFile.h>
@@ -230,11 +231,14 @@ static bool apply_params(const std::unordered_map<std::string, std::string> &kv,
     return true;
 }
 
+static bool file_exists(const char *path)
+{
+    struct stat st;
+    return stat(path, &st) == 0 && S_ISREG(st.st_mode);
+}
+
 static bool parse_args(int argc, char *argv[], Params &p)
 {
-    if (argc < 2)
-        return false;
-
     // First positional arg is the config file
     const char *config_path = nullptr;
 
@@ -270,10 +274,27 @@ static bool parse_args(int argc, char *argv[], Params &p)
         }
     }
 
-    // Load config file
+    // Auto-detect config file in current directory if none specified
+    static const char *auto_configs[] = {
+        "flaresim.conf", "flare.conf", "flaresim.cfg", "flare.cfg", nullptr};
+    std::string auto_config_buf;
     if (!config_path)
     {
-        fprintf(stderr, "ERROR: no config file specified\n");
+        for (const char **name = auto_configs; *name; ++name)
+        {
+            if (file_exists(*name))
+            {
+                auto_config_buf = *name;
+                config_path = auto_config_buf.c_str();
+                printf("Auto-detected config: %s\n", config_path);
+                break;
+            }
+        }
+    }
+    if (!config_path)
+    {
+        fprintf(stderr, "ERROR: no config file specified and none found in current directory\n");
+        fprintf(stderr, "       (looked for: flaresim.conf, flare.conf, flaresim.cfg, flare.cfg)\n");
         return false;
     }
 

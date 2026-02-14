@@ -20,6 +20,7 @@
 #include <vector>
 #include <chrono>
 #include <random>
+#include <atomic>
 
 #ifdef _OPENMP
 #include <omp.h>
@@ -70,6 +71,58 @@ static inline void splat_bilinear(float *buf, int w, int h,
 }
 
 // ---------------------------------------------------------------------------
+// Tent-filter splat: distribute a contribution over a wider footprint.
+//
+// Energy-conserving: weights sum to 1, so total deposited energy = value.
+// Falls back to bilinear when radius <= 1.5 for efficiency.
+// ---------------------------------------------------------------------------
+
+static inline void splat_tent(float *buf, int w, int h,
+                              float px, float py, float value, float radius)
+{
+    if (radius <= 1.5f)
+    {
+        splat_bilinear(buf, w, h, px, py, value);
+        return;
+    }
+
+    int ix0 = std::max((int)std::floor(px - radius), 0);
+    int ix1 = std::min((int)std::ceil(px + radius), w - 1);
+    int iy0 = std::max((int)std::floor(py - radius), 0);
+    int iy1 = std::min((int)std::ceil(py + radius), h - 1);
+
+    float inv_r = 1.0f / radius;
+    float total_w = 0;
+
+    // First pass: sum weights for normalisation
+    for (int y = iy0; y <= iy1; ++y)
+    {
+        float wy = std::max(1.0f - std::abs(y + 0.5f - py) * inv_r, 0.0f);
+        for (int x = ix0; x <= ix1; ++x)
+        {
+            float wx = std::max(1.0f - std::abs(x + 0.5f - px) * inv_r, 0.0f);
+            total_w += wx * wy;
+        }
+    }
+
+    if (total_w < 1e-12f)
+        return;
+
+    float norm = value / total_w;
+
+    // Second pass: deposit
+    for (int y = iy0; y <= iy1; ++y)
+    {
+        float wy = std::max(1.0f - std::abs(y + 0.5f - py) * inv_r, 0.0f);
+        for (int x = ix0; x <= ix1; ++x)
+        {
+            float wx = std::max(1.0f - std::abs(x + 0.5f - px) * inv_r, 0.0f);
+            buf[y * w + x] += norm * wx * wy;
+        }
+    }
+}
+
+// ---------------------------------------------------------------------------
 // Pre-filter: trace a single on-axis ray through each ghost pair.
 // Returns the average Fresnel weight across RGB wavelengths.
 // ---------------------------------------------------------------------------
@@ -109,7 +162,9 @@ static float estimate_ghost_intensity(const LensSystem &lens,
 static float estimate_ghost_spread(const LensSystem &lens,
                                    int bounce_a, int bounce_b,
                                    float sensor_half_w, float sensor_half_h,
-                                   const GhostConfig &config)
+                                   const GhostConfig &config,
+                                   float *out_ghost_w_mm = nullptr,
+                                   float *out_ghost_h_mm = nullptr)
 {
     constexpr int G = 8; // coarse grid for spread estimation
     float front_R = lens.surfaces[0].semi_aperture;
@@ -153,6 +208,12 @@ static float estimate_ghost_spread(const LensSystem &lens,
     float ghost_h = std::max(max_y - min_y, 0.01f);
     float sensor_w = 2.0f * sensor_half_w;
     float sensor_h = 2.0f * sensor_half_h;
+
+    // Output ghost dimensions in mm for splat radius computation
+    if (out_ghost_w_mm)
+        *out_ghost_w_mm = ghost_w;
+    if (out_ghost_h_mm)
+        *out_ghost_h_mm = ghost_h;
 
     // Correction = how much larger the ghost image is than the sensor.
     // Clamped to [1, max_boost] — never dim a focused ghost, and cap the boost.
@@ -229,7 +290,6 @@ void render_ghosts(const LensSystem &lens,
         float est = estimate_ghost_intensity(lens, p.surf_a, p.surf_b, config);
         if (est >= config.min_intensity)
         {
-            // Estimate defocus spread and compute area correction
             float boost = 1.0f;
             if (config.ghost_normalize)
             {
@@ -237,6 +297,7 @@ void render_ghosts(const LensSystem &lens,
                                               sensor_half_w, sensor_half_h,
                                               config);
             }
+
             active_pairs.push_back(p);
             pair_area_boost.push_back(boost);
         }
@@ -254,6 +315,7 @@ void render_ghosts(const LensSystem &lens,
                        pair_area_boost[i]);
         }
     }
+    printf("Splat mode: per-source adaptive (collect-then-splat)\n");
 
     auto t0 = std::chrono::steady_clock::now();
 
@@ -290,6 +352,10 @@ void render_ghosts(const LensSystem &lens,
            active_pairs.size(), sources.size(), num_threads);
     fflush(stdout);
 
+    // Progress tracking for ETA (atomic so all threads can update safely)
+    int total_pairs = (int)active_pairs.size();
+    std::atomic<int> pairs_done{0};
+
 #pragma omp parallel for schedule(dynamic, 1)
     for (int pi = 0; pi < (int)active_pairs.size(); ++pi)
     {
@@ -303,6 +369,13 @@ void render_ghosts(const LensSystem &lens,
 
         auto tp0 = std::chrono::steady_clock::now();
         long long hits = 0, attempts = 0;
+
+        // Hit record for collect-then-splat
+        struct SplatHit
+        {
+            float px, py, value;
+            int ch;
+        };
 
         // Process every bright source for this ghost pair
         for (int si = 0; si < (int)sources.size(); ++si)
@@ -320,7 +393,16 @@ void render_ghosts(const LensSystem &lens,
                                    1.0f)
                                  .normalized();
 
-            // Trace grid of rays across entrance pupil with stratified jitter
+            // ---- Pass 1: trace all rays and collect hits ----
+            std::vector<SplatHit> hit_buf;
+            hit_buf.reserve(valid_grid_count);
+
+            // Track bounding box of hit positions (green channel only
+            // to avoid chromatic dispersion inflating the extent)
+            float bbox_min_x = 1e30f, bbox_max_x = -1e30f;
+            float bbox_min_y = 1e30f, bbox_max_y = -1e30f;
+            int green_hits = 0;
+
             for (int gy = 0; gy < N; ++gy)
             {
                 for (int gx = 0; gx < N; ++gx)
@@ -358,13 +440,50 @@ void render_ghosts(const LensSystem &lens,
                         if (contribution < 1e-12f)
                             continue;
 
-                        // Bilinear splat into per-thread buffer
-                        auto &buf = (ch == 0)   ? tbuf_r[tid]
-                                    : (ch == 1) ? tbuf_g[tid]
-                                                : tbuf_b[tid];
-                        splat_bilinear(buf.data(), width, height, px, py, contribution);
+                        hit_buf.push_back({px, py, contribution, ch});
+
+                        // Update bounding box from green channel
+                        if (ch == 1)
+                        {
+                            bbox_min_x = std::min(bbox_min_x, px);
+                            bbox_max_x = std::max(bbox_max_x, px);
+                            bbox_min_y = std::min(bbox_min_y, py);
+                            bbox_max_y = std::max(bbox_max_y, py);
+                            ++green_hits;
+                        }
                     }
                 }
+            }
+
+            // ---- Compute adaptive splat radius from actual hit density ----
+            //
+            // sqrt(green_hits) approximates the linear density of hits.
+            // Dividing the ghost extent by this gives the effective inter-hit
+            // spacing.  A 1.2× tent radius fills inter-ray gaps with some
+            // overlap, producing continuous filled shapes rather than scattered
+            // points.  Unlike the old per-pair on-axis estimate, this uses
+            // real hit data so it adapts correctly to off-axis vignetting.
+            float adaptive_r = 1.5f; // minimum: slightly above bilinear
+            if (green_hits >= 4)
+            {
+                float extent_x = bbox_max_x - bbox_min_x;
+                float extent_y = bbox_max_y - bbox_min_y;
+                float extent = std::max(std::max(extent_x, extent_y), 1.0f);
+
+                float linear_density = std::sqrt((float)green_hits);
+                float spacing = extent / linear_density;
+
+                // 1.2× spacing gives good tent overlap; clamp to [1.5, 80]
+                adaptive_r = std::clamp(spacing * 1.2f, 1.5f, 80.0f);
+            }
+
+            // ---- Pass 2: splat all collected hits ----
+            for (auto &h : hit_buf)
+            {
+                auto &buf = (h.ch == 0)   ? tbuf_r[tid]
+                            : (h.ch == 1) ? tbuf_g[tid]
+                                          : tbuf_b[tid];
+                splat_tent(buf.data(), width, height, h.px, h.py, h.value, adaptive_r);
             }
         }
 
@@ -372,7 +491,22 @@ void render_ghosts(const LensSystem &lens,
         pair_hits[pi] = hits;
         pair_attempts[pi] = attempts;
         pair_time[pi] = std::chrono::duration<double>(tp1 - tp0).count();
+
+        // Progress + ETA (printed from whichever thread finishes a pair)
+        int done = ++pairs_done;
+        double elapsed = std::chrono::duration<double>(tp1 - t0).count();
+        double per_pair = elapsed / done;
+        int remaining = total_pairs - done;
+        double eta_sec = per_pair * remaining;
+        int eta_m = (int)(eta_sec / 60.0);
+        int eta_s = (int)(eta_sec) % 60;
+        printf("\r  [%d/%d] pair (%d,%d) done in %.1fs  |  "
+               "elapsed %.0fs  ETA %dm%02ds   ",
+               done, total_pairs, a, b, pair_time[pi],
+               elapsed, eta_m, eta_s);
+        fflush(stdout);
     }
+    printf("\n"); // newline after last \r progress line
 
     // Print per-pair diagnostics (after parallel section completes)
     for (size_t pi = 0; pi < active_pairs.size(); ++pi)
