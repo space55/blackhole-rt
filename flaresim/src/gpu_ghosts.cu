@@ -744,6 +744,8 @@ bool render_ghosts_gpu(const std::vector<GPUSurface> &surfaces,
     // Process groups
     int gi = 0;
     int img_w = config.img_width, img_h = config.img_height;
+    int hits_splatted = 0;
+    auto t_last_print = t_splat;
     while (gi < num_hits)
     {
         // Find end of this group
@@ -793,8 +795,26 @@ bool render_ghosts_gpu(const std::vector<GPUSurface> &surfaces,
             h_splat_tent(buf, img_w, img_h, h.px, h.py, h.value, adaptive_r);
         }
 
+        hits_splatted += (gj - gi);
         gi = gj;
+
+        // Progress / ETA update (at most every 250 ms)
+        auto t_now = std::chrono::steady_clock::now();
+        double since_print = std::chrono::duration<double>(t_now - t_last_print).count();
+        if (since_print >= 0.25 || gi >= num_hits)
+        {
+            double elapsed = std::chrono::duration<double>(t_now - t_splat).count();
+            double frac = (double)hits_splatted / num_hits;
+            double eta = (frac > 1e-6) ? elapsed / frac * (1.0 - frac) : 0.0;
+            int e_m = (int)elapsed / 60, e_s = (int)elapsed % 60;
+            int r_m = (int)eta / 60, r_s = (int)eta % 60;
+            printf("\r  Splatting: %d / %d hits  (%.0f%%)  %d:%02d elapsed  ETA %d:%02d   ",
+                   hits_splatted, num_hits, frac * 100.0, e_m, e_s, r_m, r_s);
+            fflush(stdout);
+            t_last_print = t_now;
+        }
     }
+    printf("\n");
 
     auto t_end = std::chrono::steady_clock::now();
     double splat_time = std::chrono::duration<double>(t_end - t_splat).count();
