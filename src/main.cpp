@@ -55,7 +55,8 @@ int main(int argc, char *argv[])
         cfg.disk_density, cfg.disk_opacity,
         cfg.disk_emission_boost, cfg.disk_color_variation,
         cfg.disk_turbulence, cfg.time,
-        cfg.disk_flat_mode, cfg.disk_inner_r);
+        cfg.disk_flat_mode, cfg.disk_inner_r,
+        cfg.disk_stipple);
 
     printf("Black hole: M=%.1f, a=%.2f, r+=%.4f, ISCO=%.4f, disk_inner=%.4f%s\n",
            pp.bh_mass, pp.bh_spin, pp.r_plus, pp.disk_isco, pp.disk_inner_r,

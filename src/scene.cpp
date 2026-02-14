@@ -120,6 +120,7 @@ bool load_scene_config(const char *path, scene_config_s &cfg)
     get_double("disk_emission_boost", cfg.disk_emission_boost);
     get_double("disk_color_variation", cfg.disk_color_variation);
     get_double("disk_turbulence", cfg.disk_turbulence);
+    get_double("disk_stipple", cfg.disk_stipple);
     get_int("disk_flat_mode", cfg.disk_flat_mode);
 
     // Tone mapping
@@ -168,8 +169,8 @@ void print_scene_config(const scene_config_s &cfg)
            cfg.base_dt, cfg.max_affine, cfg.escape_radius);
     printf("  Disk:      inner_r=%.2f  outer_r=%.1f  thickness=%.2f  density=%.1f  opacity=%.2f\n",
            cfg.disk_inner_r, cfg.disk_outer_r, cfg.disk_thickness, cfg.disk_density, cfg.disk_opacity);
-    printf("  Disk look: emission_boost=%.1f  color_variation=%.2f  turbulence=%.2f  flat_mode=%d\n",
-           cfg.disk_emission_boost, cfg.disk_color_variation, cfg.disk_turbulence, cfg.disk_flat_mode);
+    printf("  Disk look: emission_boost=%.1f  color_variation=%.2f  turbulence=%.2f  stipple=%.2f  flat_mode=%d\n",
+           cfg.disk_emission_boost, cfg.disk_color_variation, cfg.disk_turbulence, cfg.disk_stipple, cfg.disk_flat_mode);
     printf("  Tonemap:   compression=%.2f  exposure=%.2f\n", cfg.tonemap_compression, cfg.exposure);
     printf("  AA:        %dx%d = %d samples/pixel\n", cfg.aa_samples, cfg.aa_samples, cfg.aa_samples * cfg.aa_samples);
     printf("  Bloom:     strength=%.2f  threshold=%.2f  radius=%.3f\n",

@@ -59,6 +59,7 @@ disk_opacity    = 1.0           # absorption per unit density κ₀
 disk_emission_boost   = 10.0    # brightness multiplier (does not affect opacity)
 disk_color_variation  = 1.0     # 0 = physically accurate, 1 = full cinematic colour
 disk_turbulence       = 1.0     # 0 = smooth uniform disk, 1 = torn-apart debris ring
+disk_stipple          = 0.7     # 0 = smooth, 1 = fully particulate (specs & clumps)
 
 # --- Disk flat mode ---------------------------------------------------------
 # Toggle for a thin, highly textured, opaque disk appearance.

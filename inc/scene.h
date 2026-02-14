@@ -55,6 +55,7 @@ struct scene_config_s
     double disk_emission_boost = 10.0;
     double disk_color_variation = 0.7;
     double disk_turbulence = 0.0;
+    double disk_stipple = 0.0; // 0 = smooth, 1 = fully particulate (specs & clumps)
 
     // Flat disk mode: 0 = normal volumetric disk, 1 = thin/flat with rich texture & high opacity
     int disk_flat_mode = 0;

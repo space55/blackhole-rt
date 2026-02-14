@@ -40,6 +40,9 @@ struct PhysicsParams
     double disk_turbulence;
     double disk_time;
 
+    // Stipple / particle texture
+    double disk_stipple; // 0 = smooth, 1 = fully particulate (specs & clumps)
+
     // Flat disk mode: 0 = normal volumetric, 1 = thin/flat with extra texture & opacity
     int disk_flat_mode;
 };
@@ -277,6 +280,121 @@ BH_FUNC inline double disk_warped_half_thickness(const dvec3 &pos, double r_ks,
     return h0 * fmax(factor, 0.05);
 }
 
+// ============================================================================
+// Procedural hash & noise for stipple / particle texture
+// ============================================================================
+
+// Integer hash — CPU + GPU compatible (Muller finalizer)
+BH_FUNC inline unsigned int bh_hash(unsigned int x)
+{
+    x = ((x >> 16) ^ x) * 0x45d9f3bu;
+    x = ((x >> 16) ^ x) * 0x45d9f3bu;
+    x = (x >> 16) ^ x;
+    return x;
+}
+
+// Hash 3D integer coords to [0,1]
+BH_FUNC inline double bh_hash_01(int ix, int iy, int iz)
+{
+    unsigned int h = bh_hash(
+        (unsigned int)(ix * 374761393 + iy * 668265263 + iz * 1274126177));
+    return (h & 0x00FFFFFFu) * (1.0 / 16777215.0);
+}
+
+// Quintic smooth interpolant (C2 continuous — no grid artifacts)
+BH_FUNC inline double bh_smootherstep(double t)
+{
+    return t * t * t * (t * (t * 6.0 - 15.0) + 10.0);
+}
+
+// 3D value noise in [0,1] — trilinear interpolation of hashed lattice values
+BH_FUNC inline double bh_value_noise(double x, double y, double z)
+{
+    int ix = (int)floor(x), iy = (int)floor(y), iz = (int)floor(z);
+    double fx = x - ix, fy = y - iy, fz = z - iz;
+    double sx = bh_smootherstep(fx), sy = bh_smootherstep(fy), sz = bh_smootherstep(fz);
+
+    double c000 = bh_hash_01(ix, iy, iz), c100 = bh_hash_01(ix + 1, iy, iz);
+    double c010 = bh_hash_01(ix, iy + 1, iz), c110 = bh_hash_01(ix + 1, iy + 1, iz);
+    double c001 = bh_hash_01(ix, iy, iz + 1), c101 = bh_hash_01(ix + 1, iy, iz + 1);
+    double c011 = bh_hash_01(ix, iy + 1, iz + 1), c111 = bh_hash_01(ix + 1, iy + 1, iz + 1);
+
+    double x00 = c000 + sx * (c100 - c000), x10 = c010 + sx * (c110 - c010);
+    double x01 = c001 + sx * (c101 - c001), x11 = c011 + sx * (c111 - c011);
+    double xy0 = x00 + sy * (x10 - x00), xy1 = x01 + sy * (x11 - x01);
+    return xy0 + sz * (xy1 - xy0);
+}
+
+// Stipple / particle factor: creates discrete bright specks and dim voids.
+// Returns a multiplicative modulation on disk density.
+//   stipple = 0 → returns 1.0 (no effect)
+//   stipple = 1 → full particulate texture (bright specks, dark gaps)
+BH_FUNC inline double disk_stipple_factor(const dvec3 &pos, double r_ks,
+                                          double warped_h, const PhysicsParams &pp)
+{
+    if (pp.disk_stipple < 1e-6)
+        return 1.0;
+
+    const double inner_r = pp.disk_inner_r;
+    const double outer_r = pp.disk_outer_r;
+    const double stip_inner = pp.disk_flat_mode ? inner_r * 0.5 : inner_r;
+    const double stip_outer = pp.disk_flat_mode ? outer_r * 1.4 : outer_r;
+    if (r_ks < stip_inner || r_ks > stip_outer)
+        return 1.0;
+
+    const double phi = atan2(pos.z, pos.x);
+    const double log_r = log(fmax(r_ks, 1e-6));
+    const double y_h = (warped_h > 1e-12) ? (pos.y / warped_h) : 0.0;
+
+    // Keplerian rotation so particles orbit with the disk
+    const double omega = 1.0 / (r_ks * sqrt(r_ks));
+    const double rot_phi = phi + pp.disk_time * omega;
+
+    // Multi-octave thresholded value noise → discrete specks at each scale
+    double particle = 0.0;
+
+    // Octave 1: medium specks (dominant visible particle texture)
+    {
+        double u = rot_phi * 25.0 / (2.0 * M_PI);
+        double v = log_r * 35.0;
+        double w = y_h * 4.0;
+        double n = bh_value_noise(u, v, w);
+        // Sharp threshold: only noise peaks become visible specks
+        double spec = dclamp((n - 0.55) / 0.14, 0.0, 1.0);
+        particle += 0.55 * spec * spec; // squared for extra sharpness
+    }
+
+    // Octave 2: fine dust (dense small particles)
+    {
+        double u = rot_phi * 65.0 / (2.0 * M_PI) + 7.3;
+        double v = log_r * 90.0 + 3.1;
+        double w = y_h * 10.0 + 1.7;
+        double n = bh_value_noise(u, v, w);
+        double spec = dclamp((n - 0.50) / 0.16, 0.0, 1.0);
+        particle += 0.30 * spec;
+    }
+
+    // Octave 3: coarse bright clumps (sparse, large, eye-catching)
+    {
+        double u = rot_phi * 10.0 / (2.0 * M_PI) + 2.9;
+        double v = log_r * 14.0 + 5.7;
+        double w = y_h * 2.0 + 0.4;
+        double n = bh_value_noise(u, v, w);
+        double spec = dclamp((n - 0.62) / 0.10, 0.0, 1.0);
+        particle += 0.15 * spec * spec * spec; // cubed: very sparse bright knots
+    }
+
+    particle = fmin(particle, 1.0);
+
+    // Factor: voids between particles are dim, particles are bright
+    const double void_level = 0.08; // material between specks (very dim)
+    const double peak_level = 3.0;  // particles are brighter than the smooth disk
+    const double factor = void_level + (peak_level - void_level) * particle;
+
+    // Blend by stipple amount: 0 → 1.0 (no change), 1 → full particle texture
+    return 1.0 + pp.disk_stipple * (factor - 1.0);
+}
+
 // Procedural clump / streak modulation
 BH_FUNC inline double disk_clump_factor(const dvec3 &pos, double r_ks,
                                         double warped_h, const PhysicsParams &pp)
@@ -493,7 +611,9 @@ BH_FUNC inline double disk_density(const dvec3 &pos, double r_ks,
         density_scale = 8.0;
 
     return density_scale * pp.disk_density0 * radial * vertical *
-           disk_clump_factor(pos, r_ks, warped_h, pp) * outer_fade * inner_fade;
+           disk_clump_factor(pos, r_ks, warped_h, pp) *
+           disk_stipple_factor(pos, r_ks, warped_h, pp) *
+           outer_fade * inner_fade;
 }
 
 // Temperature: simplified Novikov-Thorne profile
@@ -1071,7 +1191,8 @@ inline PhysicsParams make_physics_params(double M, double a,
                                          double emission_boost, double color_variation,
                                          double turbulence, double time,
                                          int flat_mode = 0,
-                                         double disk_inner_override = -1.0)
+                                         double disk_inner_override = -1.0,
+                                         double stipple = 0.0)
 {
     PhysicsParams pp = {};
     pp.bh_mass = M;
@@ -1088,6 +1209,7 @@ inline PhysicsParams make_physics_params(double M, double a,
     pp.disk_color_variation = color_variation;
     pp.disk_turbulence = turbulence;
     pp.disk_time = time;
+    pp.disk_stipple = stipple;
     pp.disk_flat_mode = flat_mode;
     return pp;
 }
