@@ -1,14 +1,16 @@
 // ============================================================================
-// gpu_ghosts.cu — CUDA ghost ray tracing kernel + host launch
+// gpu_ghosts.cu — CUDA ghost ray tracing kernel + GPU splatting
 //
 // Architecture:
 //   1. Upload lens, sources, pairs to device memory
 //   2. Trace kernel: one thread per (pair, source, grid_x, grid_y)
 //      - traces 3 wavelengths, writes hits to compacted output via atomicAdd
-//   3. Download hits to host
-//   4. CPU: group by (pair, source), compute adaptive splat radius, tent-splat
+//   3. Compute per-group adaptive splat radii on GPU (no sorting — uses
+//      pair_idx × num_sources + source_idx as a perfect hash key)
+//   4. Splat kernel: one thread per hit, tent-filter splat with atomicAdd
+//   5. Download output image to host
 //
-// The trace is the bottleneck (~99% of time); splatting is fast on CPU.
+// Everything stays on-device — no hit buffer download required.
 // ============================================================================
 
 #include "gpu_ghosts.h"
@@ -20,11 +22,6 @@
 #include <vector>
 #include <chrono>
 #include <thread>
-#include <atomic>
-
-#ifdef _OPENMP
-#include <omp.h>
-#endif
 
 // ============================================================================
 // CUDA error checking
@@ -497,65 +494,163 @@ __global__ void ghost_trace_kernel(
 }
 
 // ============================================================================
-// Host-side: tent-filter splat (same as CPU ghost.cpp)
+// GPU splatting kernels
+//
+// Per-group adaptive radii are computed without sorting: we use
+//   group_key = pair_idx * num_sources + source_idx
+// as a perfect hash into fixed-size per-group arrays.  A single pass
+// with atomicMin/Max/Add accumulates green-channel bounding boxes,
+// then a tiny kernel converts those to adaptive tent-filter radii.
+// Finally, one thread per hit does the tent splat with atomicAdd.
 // ============================================================================
 
-static inline void h_splat_bilinear(float *buf, int w, int h,
-                                    float px, float py, float value)
+// CAS-based atomicMin/Max for float (works for all float values)
+__device__ float d_atomicMinFloat(float *addr, float val)
 {
-    int x0 = (int)floorf(px - 0.5f);
-    int y0 = (int)floorf(py - 0.5f);
-    int x1 = x0 + 1, y1 = y0 + 1;
-    float fx = (px - 0.5f) - x0;
-    float fy = (py - 0.5f) - y0;
-    float w00 = (1.0f - fx) * (1.0f - fy);
-    float w10 = fx * (1.0f - fy);
-    float w01 = (1.0f - fx) * fy;
-    float w11 = fx * fy;
-    if (x0 >= 0 && x0 < w && y0 >= 0 && y0 < h)
-        buf[y0 * w + x0] += value * w00;
-    if (x1 >= 0 && x1 < w && y0 >= 0 && y0 < h)
-        buf[y0 * w + x1] += value * w10;
-    if (x0 >= 0 && x0 < w && y1 >= 0 && y1 < h)
-        buf[y1 * w + x0] += value * w01;
-    if (x1 >= 0 && x1 < w && y1 >= 0 && y1 < h)
-        buf[y1 * w + x1] += value * w11;
+    int *addr_i = (int *)addr;
+    int old = *addr_i, assumed;
+    do
+    {
+        assumed = old;
+        if (__int_as_float(assumed) <= val)
+            return __int_as_float(assumed);
+        old = atomicCAS(addr_i, assumed, __float_as_int(val));
+    } while (assumed != old);
+    return __int_as_float(old);
 }
 
-static void h_splat_tent(float *buf, int w, int h,
-                         float px, float py, float value, float radius)
+__device__ float d_atomicMaxFloat(float *addr, float val)
 {
+    int *addr_i = (int *)addr;
+    int old = *addr_i, assumed;
+    do
+    {
+        assumed = old;
+        if (__int_as_float(assumed) >= val)
+            return __int_as_float(assumed);
+        old = atomicCAS(addr_i, assumed, __float_as_int(val));
+    } while (assumed != old);
+    return __int_as_float(old);
+}
+
+// Initialize per-group stats arrays
+__global__ void init_group_stats_kernel(float *min_x, float *max_x,
+                                        float *min_y, float *max_y,
+                                        int *green_count, int n)
+{
+    int i = blockIdx.x * blockDim.x + threadIdx.x;
+    if (i >= n)
+        return;
+    min_x[i] = 1e30f;
+    max_x[i] = -1e30f;
+    min_y[i] = 1e30f;
+    max_y[i] = -1e30f;
+    green_count[i] = 0;
+}
+
+// One pass: accumulate green-channel bbox per group
+__global__ void accumulate_group_stats_kernel(const GPURayHit *hits, int num_hits,
+                                              int num_sources,
+                                              float *min_x, float *max_x,
+                                              float *min_y, float *max_y,
+                                              int *green_count)
+{
+    int i = blockIdx.x * blockDim.x + threadIdx.x;
+    if (i >= num_hits)
+        return;
+    if (hits[i].channel != 1)
+        return; // only green contributes to bbox
+    int gkey = hits[i].pair_idx * num_sources + hits[i].source_idx;
+    d_atomicMinFloat(&min_x[gkey], hits[i].px);
+    d_atomicMaxFloat(&max_x[gkey], hits[i].px);
+    d_atomicMinFloat(&min_y[gkey], hits[i].py);
+    d_atomicMaxFloat(&max_y[gkey], hits[i].py);
+    atomicAdd(&green_count[gkey], 1);
+}
+
+// Compute adaptive tent-filter radius per group
+__global__ void compute_radii_kernel(float *radii,
+                                     const float *min_x, const float *max_x,
+                                     const float *min_y, const float *max_y,
+                                     const int *green_count, int max_groups)
+{
+    int g = blockIdx.x * blockDim.x + threadIdx.x;
+    if (g >= max_groups)
+        return;
+    int gc = green_count[g];
+    float r = 1.5f;
+    if (gc >= 4)
+    {
+        float ex = max_x[g] - min_x[g];
+        float ey = max_y[g] - min_y[g];
+        float extent = fmaxf(fmaxf(ex, ey), 1.0f);
+        float spacing = extent / sqrtf((float)gc);
+        r = fminf(fmaxf(spacing * 1.2f, 1.5f), 80.0f);
+    }
+    radii[g] = r;
+}
+
+// One thread per hit: tent-filter splat with atomicAdd
+__global__ void splat_tent_kernel(const GPURayHit *hits, int num_hits,
+                                  int num_sources, const float *group_radii,
+                                  float *out_r, float *out_g, float *out_b,
+                                  int img_w, int img_h)
+{
+    int i = blockIdx.x * blockDim.x + threadIdx.x;
+    if (i >= num_hits)
+        return;
+
+    const GPURayHit &h = hits[i];
+    int gkey = h.pair_idx * num_sources + h.source_idx;
+    float radius = group_radii[gkey];
+    float *buf = (h.channel == 0) ? out_r : (h.channel == 1) ? out_g
+                                                              : out_b;
+
     if (radius <= 1.5f)
     {
-        h_splat_bilinear(buf, w, h, px, py, value);
+        // Bilinear splat: 4 pixels
+        int x0 = (int)floorf(h.px - 0.5f);
+        int y0 = (int)floorf(h.py - 0.5f);
+        float fx = (h.px - 0.5f) - x0;
+        float fy = (h.py - 0.5f) - y0;
+        if (x0 >= 0 && x0 < img_w && y0 >= 0 && y0 < img_h)
+            atomicAdd(&buf[y0 * img_w + x0], h.value * (1.0f - fx) * (1.0f - fy));
+        if (x0 + 1 >= 0 && x0 + 1 < img_w && y0 >= 0 && y0 < img_h)
+            atomicAdd(&buf[y0 * img_w + x0 + 1], h.value * fx * (1.0f - fy));
+        if (x0 >= 0 && x0 < img_w && y0 + 1 >= 0 && y0 + 1 < img_h)
+            atomicAdd(&buf[(y0 + 1) * img_w + x0], h.value * (1.0f - fx) * fy);
+        if (x0 + 1 >= 0 && x0 + 1 < img_w && y0 + 1 >= 0 && y0 + 1 < img_h)
+            atomicAdd(&buf[(y0 + 1) * img_w + x0 + 1], h.value * fx * fy);
         return;
     }
-    int ix0 = std::max((int)floorf(px - radius), 0);
-    int ix1 = std::min((int)ceilf(px + radius), w - 1);
-    int iy0 = std::max((int)floorf(py - radius), 0);
-    int iy1 = std::min((int)ceilf(py + radius), h - 1);
+
+    // Tent filter splat with separable normalization
+    int ix0 = max((int)floorf(h.px - radius), 0);
+    int ix1 = min((int)ceilf(h.px + radius), img_w - 1);
+    int iy0 = max((int)floorf(h.py - radius), 0);
+    int iy1 = min((int)ceilf(h.py + radius), img_h - 1);
 
     float inv_r = 1.0f / radius;
-    float total_w = 0;
+
+    // Separable: total_w = sum_wx × sum_wy (avoids double-pass over footprint)
+    float sum_wx = 0.0f, sum_wy = 0.0f;
+    for (int x = ix0; x <= ix1; ++x)
+        sum_wx += fmaxf(1.0f - fabsf(x + 0.5f - h.px) * inv_r, 0.0f);
     for (int y = iy0; y <= iy1; ++y)
-    {
-        float wy = std::max(1.0f - fabsf(y + 0.5f - py) * inv_r, 0.0f);
-        for (int x = ix0; x <= ix1; ++x)
-        {
-            float wx = std::max(1.0f - fabsf(x + 0.5f - px) * inv_r, 0.0f);
-            total_w += wx * wy;
-        }
-    }
-    if (total_w < 1e-12f)
+        sum_wy += fmaxf(1.0f - fabsf(y + 0.5f - h.py) * inv_r, 0.0f);
+
+    float tw = sum_wx * sum_wy;
+    if (tw < 1e-12f)
         return;
-    float norm = value / total_w;
+    float norm = h.value / tw;
+
     for (int y = iy0; y <= iy1; ++y)
     {
-        float wy = std::max(1.0f - fabsf(y + 0.5f - py) * inv_r, 0.0f);
+        float wy = fmaxf(1.0f - fabsf(y + 0.5f - h.py) * inv_r, 0.0f);
         for (int x = ix0; x <= ix1; ++x)
         {
-            float wx = std::max(1.0f - fabsf(x + 0.5f - px) * inv_r, 0.0f);
-            buf[y * w + x] += norm * wx * wy;
+            float wx = fmaxf(1.0f - fabsf(x + 0.5f - h.px) * inv_r, 0.0f);
+            atomicAdd(&buf[y * img_w + x], norm * wx * wy);
         }
     }
 }
@@ -608,7 +703,10 @@ bool render_ghosts_gpu(const std::vector<GPUSurface> &surfaces,
                     surfaces.size() * sizeof(GPUSurface) +
                     sources.size() * sizeof(GPUBrightPixel) +
                     pairs.size() * sizeof(GPUGhostPair) +
-                    sizeof(int) * 2; // counters
+                    sizeof(int) * 2 + // counters
+                    // GPU splatting buffers (output images + per-group stats)
+                    (size_t)config.img_width * config.img_height * sizeof(float) * 3 +
+                    (size_t)config.num_pairs * config.num_sources * sizeof(float) * 5;
     if (needed > free_mem * 0.9)
     {
         fprintf(stderr, "GPU: not enough memory (need %.0f MB, have %.0f MB free)\n",
@@ -700,174 +798,148 @@ bool render_ghosts_gpu(const std::vector<GPUSurface> &surfaces,
     printf("GPU hits: %d (%.1f%% of %lld rays)\n",
            num_hits, 100.0 * num_hits / std::max(max_rays, 1LL), max_rays);
 
-    // Download hits
-    std::vector<GPURayHit> h_hits(num_hits);
-    if (num_hits > 0)
-    {
-        CUDA_CHECK(cudaMemcpy(h_hits.data(), d_hits,
-                              (size_t)num_hits * sizeof(GPURayHit), cudaMemcpyDeviceToHost));
-    }
-
-    // Cleanup device memory
+    // Free trace-only resources (keep d_hits on device for GPU splatting)
     cudaFree(d_surfaces);
     cudaFree(d_sources);
     cudaFree(d_pairs);
-    cudaFree(d_hits);
     cudaFree(d_hit_count);
     cudaFreeHost(h_progress);
     cudaEventDestroy(ev_start);
     cudaEventDestroy(ev_stop);
 
     // ================================================================
-    // CPU-side: parallel adaptive tent-filter splatting
+    // GPU-side: adaptive tent-filter splatting
     //
-    // 1. Pre-compute group boundaries + adaptive radii (serial, fast)
-    // 2. Parallel-for over groups with per-thread buffers
-    // 3. Reduce per-thread buffers into output
+    // Uses pair_idx × num_sources + source_idx as a perfect hash key
+    // into per-group arrays, avoiding the need to sort 80M+ hits.
+    //
+    // 1. Accumulate green-channel bbox per group (atomicMin/Max)
+    // 2. Compute adaptive radius per group
+    // 3. Splat kernel: one thread per hit, atomicAdd on output image
     // ================================================================
 
     int img_w = config.img_width, img_h = config.img_height;
     int num_px = img_w * img_h;
+    int max_groups = config.num_pairs * config.num_sources;
 
-    int num_threads = 1;
-#ifdef _OPENMP
-    num_threads = omp_get_max_threads();
-#endif
-
-    printf("CPU splatting %d hits with adaptive radii (%d thread%s)...\n",
-           num_hits, num_threads, num_threads > 1 ? "s" : "");
+    printf("GPU splatting %d hits (%d potential groups, %dx%d image)...\n",
+           num_hits, max_groups, img_w, img_h);
     auto t_splat = std::chrono::steady_clock::now();
 
-    // Sort hits by (pair_idx, source_idx) for grouping
-    int num_sources_i = config.num_sources;
+    // Allocate per-group stats (small: e.g. 55 pairs × 1000 sources = 220 KB)
+    float *d_gmin_x = nullptr, *d_gmax_x = nullptr;
+    float *d_gmin_y = nullptr, *d_gmax_y = nullptr;
+    int *d_green_count = nullptr;
+    float *d_group_radii = nullptr;
 
-    std::vector<int> indices(num_hits);
-    for (int i = 0; i < num_hits; ++i)
-        indices[i] = i;
-    std::sort(indices.begin(), indices.end(), [&](int a, int b)
-              {
-                  long long ka = (long long)h_hits[a].pair_idx * num_sources_i + h_hits[a].source_idx;
-                  long long kb = (long long)h_hits[b].pair_idx * num_sources_i + h_hits[b].source_idx;
-                  return ka < kb; });
+    CUDA_CHECK(cudaMalloc(&d_gmin_x, max_groups * sizeof(float)));
+    CUDA_CHECK(cudaMalloc(&d_gmax_x, max_groups * sizeof(float)));
+    CUDA_CHECK(cudaMalloc(&d_gmin_y, max_groups * sizeof(float)));
+    CUDA_CHECK(cudaMalloc(&d_gmax_y, max_groups * sizeof(float)));
+    CUDA_CHECK(cudaMalloc(&d_green_count, max_groups * sizeof(int)));
+    CUDA_CHECK(cudaMalloc(&d_group_radii, max_groups * sizeof(float)));
 
-    // ---- Step 1: pre-compute group boundaries and adaptive radii ----
-    struct SplatGroup
+    // Allocate device output images (zeroed)
+    float *d_out_r = nullptr, *d_out_g = nullptr, *d_out_b = nullptr;
+    CUDA_CHECK(cudaMalloc(&d_out_r, num_px * sizeof(float)));
+    CUDA_CHECK(cudaMalloc(&d_out_g, num_px * sizeof(float)));
+    CUDA_CHECK(cudaMalloc(&d_out_b, num_px * sizeof(float)));
+    CUDA_CHECK(cudaMemset(d_out_r, 0, num_px * sizeof(float)));
+    CUDA_CHECK(cudaMemset(d_out_g, 0, num_px * sizeof(float)));
+    CUDA_CHECK(cudaMemset(d_out_b, 0, num_px * sizeof(float)));
+
+    const int BLK = 256;
+
+    // ---- Step 1: init group stats ----
     {
-        int begin, end;   // index range in sorted hits
-        float adaptive_r; // tent-filter radius
-    };
-    std::vector<SplatGroup> groups;
-    groups.reserve(1024);
-
-    {
-        int gi = 0;
-        while (gi < num_hits)
-        {
-            int g_pair = h_hits[indices[gi]].pair_idx;
-            int g_src = h_hits[indices[gi]].source_idx;
-            int gj = gi;
-            while (gj < num_hits &&
-                   h_hits[indices[gj]].pair_idx == g_pair &&
-                   h_hits[indices[gj]].source_idx == g_src)
-                ++gj;
-
-            // Compute adaptive radius from green-channel hits
-            float bbox_min_x = 1e30f, bbox_max_x = -1e30f;
-            float bbox_min_y = 1e30f, bbox_max_y = -1e30f;
-            int green_hits = 0;
-            for (int k = gi; k < gj; ++k)
-            {
-                const GPURayHit &h = h_hits[indices[k]];
-                if (h.channel == 1)
-                {
-                    bbox_min_x = std::min(bbox_min_x, h.px);
-                    bbox_max_x = std::max(bbox_max_x, h.px);
-                    bbox_min_y = std::min(bbox_min_y, h.py);
-                    bbox_max_y = std::max(bbox_max_y, h.py);
-                    ++green_hits;
-                }
-            }
-            float adaptive_r = 1.5f;
-            if (green_hits >= 4)
-            {
-                float extent_x = bbox_max_x - bbox_min_x;
-                float extent_y = bbox_max_y - bbox_min_y;
-                float extent = std::max(std::max(extent_x, extent_y), 1.0f);
-                float linear_density = sqrtf((float)green_hits);
-                float spacing = extent / linear_density;
-                adaptive_r = std::clamp(spacing * 1.2f, 1.5f, 80.0f);
-            }
-
-            groups.push_back({gi, gj, adaptive_r});
-            gi = gj;
-        }
+        int nblk = (max_groups + BLK - 1) / BLK;
+        init_group_stats_kernel<<<nblk, BLK>>>(
+            d_gmin_x, d_gmax_x, d_gmin_y, d_gmax_y, d_green_count, max_groups);
+        CUDA_CHECK(cudaGetLastError());
     }
 
-    int num_groups = (int)groups.size();
-    printf("  %d groups, sorting took %.2f s\n", num_groups,
-           std::chrono::duration<double>(std::chrono::steady_clock::now() - t_splat).count());
-
-    // ---- Step 2: parallel splat into per-thread buffers ----
-    // Allocate per-thread accumulation buffers
-    std::vector<std::vector<float>> tbuf_r(num_threads, std::vector<float>(num_px, 0.0f));
-    std::vector<std::vector<float>> tbuf_g(num_threads, std::vector<float>(num_px, 0.0f));
-    std::vector<std::vector<float>> tbuf_b(num_threads, std::vector<float>(num_px, 0.0f));
-
-    std::atomic<int> groups_done{0};
-    auto t_splat_loop = std::chrono::steady_clock::now();
-
-#pragma omp parallel for schedule(dynamic, 4)
-    for (int g = 0; g < num_groups; ++g)
+    // ---- Step 2: accumulate green-channel bbox per group ----
     {
-        int tid = 0;
-#ifdef _OPENMP
-        tid = omp_get_thread_num();
-#endif
-        const SplatGroup &grp = groups[g];
-        for (int k = grp.begin; k < grp.end; ++k)
-        {
-            const GPURayHit &h = h_hits[indices[k]];
-            float *buf = (h.channel == 0)   ? tbuf_r[tid].data()
-                         : (h.channel == 1) ? tbuf_g[tid].data()
-                                            : tbuf_b[tid].data();
-            h_splat_tent(buf, img_w, img_h, h.px, h.py, h.value, grp.adaptive_r);
-        }
-
-        // ETA progress (from any thread, throttled by atomic check)
-        int done = ++groups_done;
-        if ((done & 63) == 0 || done == num_groups)
-        {
-            auto t_now = std::chrono::steady_clock::now();
-            double elapsed = std::chrono::duration<double>(t_now - t_splat_loop).count();
-            double frac = (double)done / num_groups;
-            double eta = (frac > 1e-6) ? elapsed / frac * (1.0 - frac) : 0.0;
-            int e_m = (int)elapsed / 60, e_s = (int)elapsed % 60;
-            int r_m = (int)eta / 60, r_s = (int)eta % 60;
-            printf("\r  Splatting: %d / %d groups  (%.0f%%)  %d:%02d elapsed  ETA %d:%02d   ",
-                   done, num_groups, frac * 100.0, e_m, e_s, r_m, r_s);
-            fflush(stdout);
-        }
+        int nblk = (num_hits + BLK - 1) / BLK;
+        accumulate_group_stats_kernel<<<nblk, BLK>>>(
+            d_hits, num_hits, config.num_sources,
+            d_gmin_x, d_gmax_x, d_gmin_y, d_gmax_y, d_green_count);
+        CUDA_CHECK(cudaGetLastError());
     }
-    printf("\n");
 
-    // ---- Step 3: reduce per-thread buffers into output ----
-    printf("  Reducing %d thread buffers...\n", num_threads);
-#pragma omp parallel for
-    for (int i = 0; i < num_px; ++i)
+    // ---- Step 3: compute adaptive radius per group ----
     {
-        for (int t = 0; t < num_threads; ++t)
-        {
-            out_r[i] += tbuf_r[t][i];
-            out_g[i] += tbuf_g[t][i];
-            out_b[i] += tbuf_b[t][i];
-        }
+        int nblk = (max_groups + BLK - 1) / BLK;
+        compute_radii_kernel<<<nblk, BLK>>>(
+            d_group_radii, d_gmin_x, d_gmax_x, d_gmin_y, d_gmax_y,
+            d_green_count, max_groups);
+        CUDA_CHECK(cudaGetLastError());
     }
+
+    // Free group stats (radii array kept for splat kernel)
+    cudaFree(d_gmin_x);
+    cudaFree(d_gmax_x);
+    cudaFree(d_gmin_y);
+    cudaFree(d_gmax_y);
+    cudaFree(d_green_count);
+
+    // ---- Step 4: splat kernel — one thread per hit ----
+    printf("  Launching splat kernel: %d hits...\n", num_hits);
+
+    cudaEvent_t ev_splat_start, ev_splat_stop;
+    CUDA_CHECK(cudaEventCreate(&ev_splat_start));
+    CUDA_CHECK(cudaEventCreate(&ev_splat_stop));
+    CUDA_CHECK(cudaEventRecord(ev_splat_start));
+
+    {
+        int nblk = (num_hits + BLK - 1) / BLK;
+        splat_tent_kernel<<<nblk, BLK>>>(
+            d_hits, num_hits, config.num_sources, d_group_radii,
+            d_out_r, d_out_g, d_out_b, img_w, img_h);
+        CUDA_CHECK(cudaGetLastError());
+    }
+
+    CUDA_CHECK(cudaEventRecord(ev_splat_stop));
+    CUDA_CHECK(cudaEventSynchronize(ev_splat_stop));
+
+    float splat_ms = 0;
+    CUDA_CHECK(cudaEventElapsedTime(&splat_ms, ev_splat_start, ev_splat_stop));
+    printf("  GPU splat kernel: %.2f s (%.1f Mhit/s)\n",
+           splat_ms / 1000.0, num_hits / splat_ms / 1000.0);
+
+    cudaEventDestroy(ev_splat_start);
+    cudaEventDestroy(ev_splat_stop);
+
+    // ---- Step 5: download output images and add to host buffers ----
+    {
+        std::vector<float> tmp(num_px);
+
+        CUDA_CHECK(cudaMemcpy(tmp.data(), d_out_r, num_px * sizeof(float), cudaMemcpyDeviceToHost));
+        for (int i = 0; i < num_px; ++i)
+            out_r[i] += tmp[i];
+
+        CUDA_CHECK(cudaMemcpy(tmp.data(), d_out_g, num_px * sizeof(float), cudaMemcpyDeviceToHost));
+        for (int i = 0; i < num_px; ++i)
+            out_g[i] += tmp[i];
+
+        CUDA_CHECK(cudaMemcpy(tmp.data(), d_out_b, num_px * sizeof(float), cudaMemcpyDeviceToHost));
+        for (int i = 0; i < num_px; ++i)
+            out_b[i] += tmp[i];
+    }
+
+    // Cleanup
+    cudaFree(d_hits);
+    cudaFree(d_group_radii);
+    cudaFree(d_out_r);
+    cudaFree(d_out_g);
+    cudaFree(d_out_b);
 
     auto t_end = std::chrono::steady_clock::now();
     double splat_time = std::chrono::duration<double>(t_end - t_splat).count();
     double total_time = std::chrono::duration<double>(t_end - t_start).count();
-    printf("CPU splat: %.2f s\n", splat_time);
-    printf("GPU ghost total: %.2f s (kernel %.2f s + download + splat %.2f s)\n",
+    printf("GPU splat total: %.2f s (kernel %.2f s + overhead %.2f s)\n",
+           splat_time, splat_ms / 1000.0, splat_time - splat_ms / 1000.0);
+    printf("GPU ghost total: %.2f s (trace %.2f s + splat %.2f s)\n",
            total_time, kernel_ms / 1000.0, splat_time);
 
     return true;
