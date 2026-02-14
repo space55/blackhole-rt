@@ -19,6 +19,9 @@
 #include <string>
 #include <vector>
 #include <chrono>
+#include <fstream>
+#include <sstream>
+#include <unordered_map>
 
 #include <OpenEXR/ImfInputFile.h>
 #include <OpenEXR/ImfOutputFile.h>
@@ -30,6 +33,10 @@
 
 #include "lens.h"
 #include "ghost.h"
+
+#ifdef _OPENMP
+#include <omp.h>
+#endif
 
 #ifndef M_PI
 #define M_PI 3.14159265358979323846
@@ -52,77 +59,243 @@ struct Params
     float tonemap = 1.0f;        // tonemap compression for TGA
     float flare_gain = 1000.0f;  // ghost intensity multiplier (default high for visibility)
     float sky_brightness = 1.0f; // sky layer multiplier (requires sky.R/G/B layers in EXR)
-    std::string tga_file;        // optional TGA output path
-    std::string debug_tga;       // optional debug TGA: only bright pixels above threshold
+
+    // Bloom
+    float bloom_strength = 0.0f;   // 0 = off; 1.0 = strong; 3.0+ = on-fire wash-out
+    float bloom_radius = 0.04f;    // base radius as fraction of image diagonal
+    int bloom_passes = 3;          // box-blur passes (approx Gaussian)
+    int bloom_octaves = 5;         // multi-scale octaves (more = wider glow)
+    bool bloom_chromatic = true;   // warm chromatic shift (white→yellow→orange→red)
+    float bloom_threshold = -1.0f; // bloom threshold; -1 = use main threshold
+
+    // Ghost area normalization (compensate for defocused ghosts)
+    bool ghost_normalize = true;   // per-pair area correction
+    float max_area_boost = 100.0f; // cap on area correction factor
+
+    std::string tga_file;  // optional TGA output path
+    std::string debug_tga; // optional debug TGA: only bright pixels above threshold
 };
 
 static void print_usage(const char *prog)
 {
-    printf("Usage: %s input.exr output.exr [options]\n\n", prog);
+    printf("Usage: %s <config_file> [--key value ...] [options]\n\n", prog);
     printf("Physically-based lens flare simulator.\n\n");
-    printf("Required:\n");
-    printf("  --lens <file>         Lens prescription file (.lens)\n");
-    printf("  --fov <degrees>       Horizontal field of view (default: 60)\n");
-    printf("\nOptional:\n");
-    printf("  --threshold <f>       Bright pixel threshold (default: 3.0)\n");
-    printf("  --rays <n>            Entrance pupil grid size (default: 64)\n");
-    printf("  --min-ghost <f>       Ghost pair pre-filter threshold (default: 1e-7)\n");
-    printf("  --downsample <n>      Downsample bright pixels by factor (default: 4)\n");
-    printf("  --flare-gain <f>      Ghost intensity multiplier (default: 1000)\n");
-    printf("  --sky-brightness <f>  Scale sky background brightness (default: 1.0)\n");
-    printf("  --tga <file>          Also write composited TGA (beauty + flare, tonemapped)\n");
-    printf("  --exposure <f>        Exposure multiplier for TGA output (default: 1.0)\n");
-    printf("  --tonemap <f>         Tonemap compression for TGA output (default: 1.0)\n");
-    printf("  --debug-tga <file>    Write debug TGA: only bright pixels above threshold\n");
-    printf("  --help                Print this help\n");
+    printf("The config file uses key = value format (same as bhrt3 scene files).\n");
+    printf("Lines starting with # are comments.\n\n");
+    printf("Config keys:\n");
+    printf("  input           Input EXR file\n");
+    printf("  output          Output EXR file\n");
+    printf("  lens            Lens prescription file (.lens)\n");
+    printf("  fov             Horizontal field of view in degrees (default: 60)\n");
+    printf("  threshold       Bright pixel luminance threshold (default: 3.0)\n");
+    printf("  rays            Entrance pupil grid size (default: 64)\n");
+    printf("  min_ghost       Ghost pair pre-filter threshold (default: 1e-7)\n");
+    printf("  downsample      Downsample bright pixels by factor (default: 4)\n");
+    printf("  flare_gain      Ghost intensity multiplier (default: 1000)\n");
+    printf("  sky_brightness  Scale sky background brightness (default: 1.0)\n");
+    printf("  tga             Also write composited TGA (beauty + flare, tonemapped)\n");
+    printf("  exposure        Exposure multiplier for TGA output (default: 1.0)\n");
+    printf("  tonemap         Tonemap compression for TGA output (default: 1.0)\n");
+    printf("  debug_tga       Write debug TGA: only bright pixels above threshold\n");
+    printf("\nBloom (fiery wash-out glow):\n");
+    printf("  bloom_strength  Bloom intensity, 0=off (default: 0)\n");
+    printf("                    0.5 = subtle, 1.0 = strong, 3.0+ = on fire\n");
+    printf("  bloom_radius    Base blur radius as frac of diagonal (default: 0.04)\n");
+    printf("  bloom_passes    Box-blur passes, 1-10 (default: 3)\n");
+    printf("  bloom_octaves   Multi-scale octaves, 1-6 (default: 5)\n");
+    printf("  bloom_chromatic 1 = warm chromatic shift (default: 1)\n");
+    printf("  bloom_threshold Bloom bright-pixel cutoff; -1 = use threshold (default: -1)\n");
+    printf("\nGhost normalization (defocus compensation):\n");
+    printf("  ghost_normalize  1 = per-pair area correction (default: 1)\n");
+    printf("  max_area_boost   Cap on defocus boost factor (default: 100)\n");
+    printf("\nAll keys can also be passed as CLI overrides: --key value\n");
+    printf("  e.g.: %s flare.conf --flare_gain 2000 --threshold 2.0\n", prog);
+    printf("\n  --help          Print this help\n");
+}
+
+// ---- Config file parser (key = value, same format as bhrt3 scene) --------
+
+static std::string trim(const std::string &s)
+{
+    size_t start = s.find_first_not_of(" \t\r\n");
+    if (start == std::string::npos)
+        return "";
+    size_t end = s.find_last_not_of(" \t\r\n");
+    return s.substr(start, end - start + 1);
+}
+
+static bool load_config(const char *path,
+                        std::unordered_map<std::string, std::string> &kv)
+{
+    std::ifstream file(path);
+    if (!file.is_open())
+    {
+        fprintf(stderr, "ERROR: cannot open config file: %s\n", path);
+        return false;
+    }
+
+    std::string line;
+    while (std::getline(file, line))
+    {
+        // Strip comments
+        size_t hash = line.find('#');
+        if (hash != std::string::npos)
+            line = line.substr(0, hash);
+
+        line = trim(line);
+        if (line.empty())
+            continue;
+
+        size_t eq = line.find('=');
+        if (eq == std::string::npos)
+            continue;
+
+        std::string key = trim(line.substr(0, eq));
+        std::string val = trim(line.substr(eq + 1));
+
+        if (!key.empty() && !val.empty())
+            kv[key] = val;
+    }
+    return true;
+}
+
+static bool apply_params(const std::unordered_map<std::string, std::string> &kv,
+                         Params &p)
+{
+    auto get_string = [&](const char *key, std::string &out)
+    {
+        auto it = kv.find(key);
+        if (it != kv.end())
+            out = it->second;
+    };
+    auto get_float = [&](const char *key, float &out)
+    {
+        auto it = kv.find(key);
+        if (it != kv.end())
+            out = (float)std::atof(it->second.c_str());
+    };
+    auto get_int = [&](const char *key, int &out)
+    {
+        auto it = kv.find(key);
+        if (it != kv.end())
+            out = std::atoi(it->second.c_str());
+    };
+
+    get_string("input", p.input_file);
+    get_string("output", p.output_file);
+    get_string("lens", p.lens_file);
+    get_float("fov", p.fov_deg);
+    get_float("threshold", p.threshold);
+    get_int("rays", p.ray_grid);
+    get_float("min_ghost", p.min_ghost);
+    get_int("downsample", p.downsample);
+    get_float("flare_gain", p.flare_gain);
+    get_float("sky_brightness", p.sky_brightness);
+    get_string("tga", p.tga_file);
+    get_float("exposure", p.exposure);
+    get_float("tonemap", p.tonemap);
+    get_string("debug_tga", p.debug_tga);
+
+    // Bloom
+    get_float("bloom_strength", p.bloom_strength);
+    get_float("bloom_radius", p.bloom_radius);
+    get_int("bloom_passes", p.bloom_passes);
+    get_int("bloom_octaves", p.bloom_octaves);
+    get_float("bloom_threshold", p.bloom_threshold);
+    {
+        auto it = kv.find("bloom_chromatic");
+        if (it != kv.end())
+            p.bloom_chromatic = (std::atoi(it->second.c_str()) != 0);
+    }
+
+    // Ghost normalization
+    get_float("max_area_boost", p.max_area_boost);
+    {
+        auto it = kv.find("ghost_normalize");
+        if (it != kv.end())
+            p.ghost_normalize = (std::atoi(it->second.c_str()) != 0);
+    }
+
+    return true;
 }
 
 static bool parse_args(int argc, char *argv[], Params &p)
 {
-    if (argc < 3)
+    if (argc < 2)
         return false;
 
-    p.input_file = argv[1];
-    p.output_file = argv[2];
+    // First positional arg is the config file
+    const char *config_path = nullptr;
 
-    for (int i = 3; i < argc; ++i)
+    // Collect CLI overrides as key-value pairs
+    std::unordered_map<std::string, std::string> cli_kv;
+
+    int i = 1;
+    while (i < argc)
     {
-        if (!strcmp(argv[i], "--help"))
+        if (!strcmp(argv[i], "--help") || !strcmp(argv[i], "-h"))
             return false;
-        else if (!strcmp(argv[i], "--lens") && i + 1 < argc)
-            p.lens_file = argv[++i];
-        else if (!strcmp(argv[i], "--fov") && i + 1 < argc)
-            p.fov_deg = (float)atof(argv[++i]);
-        else if (!strcmp(argv[i], "--threshold") && i + 1 < argc)
-            p.threshold = (float)atof(argv[++i]);
-        else if (!strcmp(argv[i], "--rays") && i + 1 < argc)
-            p.ray_grid = std::max(4, atoi(argv[++i]));
-        else if (!strcmp(argv[i], "--min-ghost") && i + 1 < argc)
-            p.min_ghost = (float)atof(argv[++i]);
-        else if (!strcmp(argv[i], "--downsample") && i + 1 < argc)
-            p.downsample = std::max(1, atoi(argv[++i]));
-        else if (!strcmp(argv[i], "--flare-gain") && i + 1 < argc)
-            p.flare_gain = (float)atof(argv[++i]);
-        else if (!strcmp(argv[i], "--sky-brightness") && i + 1 < argc)
-            p.sky_brightness = (float)atof(argv[++i]);
-        else if (!strcmp(argv[i], "--tga") && i + 1 < argc)
-            p.tga_file = argv[++i];
-        else if (!strcmp(argv[i], "--exposure") && i + 1 < argc)
-            p.exposure = (float)atof(argv[++i]);
-        else if (!strcmp(argv[i], "--tonemap") && i + 1 < argc)
-            p.tonemap = (float)atof(argv[++i]);
-        else if (!strcmp(argv[i], "--debug-tga") && i + 1 < argc)
-            p.debug_tga = argv[++i];
+
+        // CLI key-value override: --key value
+        if (argv[i][0] == '-' && argv[i][1] == '-' && i + 1 < argc)
+        {
+            // Strip leading "--" and convert hyphens to underscores
+            std::string key(argv[i] + 2);
+            for (auto &c : key)
+                if (c == '-')
+                    c = '_';
+            cli_kv[key] = argv[i + 1];
+            i += 2;
+        }
+        else if (!config_path)
+        {
+            config_path = argv[i];
+            ++i;
+        }
         else
         {
-            fprintf(stderr, "Unknown option: %s\n", argv[i]);
+            fprintf(stderr, "ERROR: unexpected argument: %s\n", argv[i]);
             return false;
         }
     }
 
+    // Load config file
+    if (!config_path)
+    {
+        fprintf(stderr, "ERROR: no config file specified\n");
+        return false;
+    }
+
+    std::unordered_map<std::string, std::string> file_kv;
+    if (!load_config(config_path, file_kv))
+        return false;
+
+    // Apply file config, then CLI overrides on top
+    apply_params(file_kv, p);
+
+    // Merge CLI overrides into file_kv and re-apply
+    for (auto &pair : cli_kv)
+        file_kv[pair.first] = pair.second;
+    apply_params(file_kv, p);
+
+    // Clamp
+    p.ray_grid = std::max(4, p.ray_grid);
+    p.downsample = std::max(1, p.downsample);
+
+    // Validate required fields
+    if (p.input_file.empty())
+    {
+        fprintf(stderr, "ERROR: 'input' is required in config\n");
+        return false;
+    }
+    if (p.output_file.empty())
+    {
+        fprintf(stderr, "ERROR: 'output' is required in config\n");
+        return false;
+    }
     if (p.lens_file.empty())
     {
-        fprintf(stderr, "ERROR: --lens is required\n");
+        fprintf(stderr, "ERROR: 'lens' is required in config\n");
         return false;
     }
 
@@ -206,7 +379,9 @@ static bool load_exr(const char *path, EXRImage &img)
 }
 
 static bool save_exr(const char *path, const EXRImage &img,
-                     const float *flare_r, const float *flare_g, const float *flare_b)
+                     const float *flare_r, const float *flare_g, const float *flare_b,
+                     const float *bloom_r = nullptr, const float *bloom_g = nullptr,
+                     const float *bloom_b = nullptr)
 {
     try
     {
@@ -233,6 +408,15 @@ static bool save_exr(const char *path, const EXRImage &img,
         header.channels().insert("flare.G", Imf::Channel(Imf::FLOAT));
         header.channels().insert("flare.B", Imf::Channel(Imf::FLOAT));
 
+        // Bloom layers
+        bool has_bloom = (bloom_r && bloom_g && bloom_b);
+        if (has_bloom)
+        {
+            header.channels().insert("bloom.R", Imf::Channel(Imf::FLOAT));
+            header.channels().insert("bloom.G", Imf::Channel(Imf::FLOAT));
+            header.channels().insert("bloom.B", Imf::Channel(Imf::FLOAT));
+        }
+
         Imf::FrameBuffer fb;
 
         for (auto &ch : img.channels)
@@ -254,11 +438,25 @@ static bool save_exr(const char *path, const EXRImage &img,
                   Imf::Slice(Imf::FLOAT, (char *)flare_b,
                              sizeof(float), sizeof(float) * img.width));
 
+        if (has_bloom)
+        {
+            fb.insert("bloom.R",
+                      Imf::Slice(Imf::FLOAT, (char *)bloom_r,
+                                 sizeof(float), sizeof(float) * img.width));
+            fb.insert("bloom.G",
+                      Imf::Slice(Imf::FLOAT, (char *)bloom_g,
+                                 sizeof(float), sizeof(float) * img.width));
+            fb.insert("bloom.B",
+                      Imf::Slice(Imf::FLOAT, (char *)bloom_b,
+                                 sizeof(float), sizeof(float) * img.width));
+        }
+
         Imf::OutputFile file(path, header);
         file.setFrameBuffer(fb);
         file.writePixels(img.height);
 
-        printf("Wrote EXR: %s (original layers + flare.R/G/B)\n", path);
+        printf("Wrote EXR: %s (original layers + flare.R/G/B%s)\n", path,
+               has_bloom ? " + bloom.R/G/B" : "");
         return true;
     }
     catch (const std::exception &e)
@@ -266,6 +464,217 @@ static bool save_exr(const char *path, const EXRImage &img,
         fprintf(stderr, "ERROR writing EXR: %s (%s)\n", path, e.what());
         return false;
     }
+}
+
+// ---- Bloom — multi-octave box-blur with chromatic warm shift ------------
+
+static void compute_box_radii(float sigma, int num_passes, std::vector<int> &radii)
+{
+    radii.resize(num_passes);
+    float w_ideal = std::sqrt(12.0f * sigma * sigma / num_passes + 1.0f);
+    int w_lo = ((int)w_ideal) | 1;
+    if (w_lo < 1)
+        w_lo = 1;
+    int w_hi = w_lo + 2;
+    float target_var = sigma * sigma;
+    float var_lo = (w_lo * w_lo - 1) / 12.0f;
+    float var_hi = (w_hi * w_hi - 1) / 12.0f;
+    int n_hi = (var_hi > var_lo + 1e-6f)
+                   ? std::clamp((int)std::round((target_var - num_passes * var_lo) / (var_hi - var_lo)),
+                                0, num_passes)
+                   : 0;
+    for (int i = 0; i < num_passes; ++i)
+        radii[i] = ((i < n_hi) ? w_hi : w_lo) / 2;
+}
+
+static void box_blur_pass(const std::vector<float> &src_r,
+                          const std::vector<float> &src_g,
+                          const std::vector<float> &src_b,
+                          std::vector<float> &dst_r,
+                          std::vector<float> &dst_g,
+                          std::vector<float> &dst_b,
+                          int width, int height, int radius)
+{
+    const float inv_w = 1.0f / (2 * radius + 1);
+    size_t np = (size_t)width * height;
+
+    std::vector<float> tmp_r(np), tmp_g(np), tmp_b(np);
+
+    // Horizontal pass
+#pragma omp parallel for
+    for (int y = 0; y < height; ++y)
+    {
+        const int row = y * width;
+        float sr = 0, sg = 0, sb = 0;
+        for (int k = -radius; k <= radius; ++k)
+        {
+            int sx = std::clamp(k, 0, width - 1);
+            sr += src_r[row + sx];
+            sg += src_g[row + sx];
+            sb += src_b[row + sx];
+        }
+        tmp_r[row] = sr * inv_w;
+        tmp_g[row] = sg * inv_w;
+        tmp_b[row] = sb * inv_w;
+
+        for (int x = 1; x < width; ++x)
+        {
+            int add = std::min(x + radius, width - 1);
+            sr += src_r[row + add];
+            sg += src_g[row + add];
+            sb += src_b[row + add];
+            int rem = std::clamp(x - radius - 1, 0, width - 1);
+            sr -= src_r[row + rem];
+            sg -= src_g[row + rem];
+            sb -= src_b[row + rem];
+            tmp_r[row + x] = sr * inv_w;
+            tmp_g[row + x] = sg * inv_w;
+            tmp_b[row + x] = sb * inv_w;
+        }
+    }
+
+    // Vertical pass
+#pragma omp parallel for
+    for (int x = 0; x < width; ++x)
+    {
+        float sr = 0, sg = 0, sb = 0;
+        for (int k = -radius; k <= radius; ++k)
+        {
+            int sy = std::clamp(k, 0, height - 1);
+            sr += tmp_r[sy * width + x];
+            sg += tmp_g[sy * width + x];
+            sb += tmp_b[sy * width + x];
+        }
+        dst_r[x] = sr * inv_w;
+        dst_g[x] = sg * inv_w;
+        dst_b[x] = sb * inv_w;
+
+        for (int y = 1; y < height; ++y)
+        {
+            int add = std::min(y + radius, height - 1);
+            sr += tmp_r[add * width + x];
+            sg += tmp_g[add * width + x];
+            sb += tmp_b[add * width + x];
+            int rem = std::clamp(y - radius - 1, 0, height - 1);
+            sr -= tmp_r[rem * width + x];
+            sg -= tmp_g[rem * width + x];
+            sb -= tmp_b[rem * width + x];
+            dst_r[y * width + x] = sr * inv_w;
+            dst_g[y * width + x] = sg * inv_w;
+            dst_b[y * width + x] = sb * inv_w;
+        }
+    }
+}
+
+// Generate multi-octave bloom.
+// Chromatic tint shifts white-hot → yellow → orange → deep red across octaves
+// for a fiery wash-out look.  Higher bloom_strength values push bright regions
+// well past 1.0 before tonemapping, creating the "on fire" overexposed look.
+static void generate_bloom(const float *img_r, const float *img_g,
+                           const float *img_b,
+                           float *out_r, float *out_g, float *out_b,
+                           int w, int h, float bloom_thresh,
+                           float bloom_strength, float bloom_radius,
+                           int bloom_passes, int bloom_octaves,
+                           bool bloom_chromatic)
+{
+    if (bloom_strength < 1e-6f)
+        return;
+
+    size_t np = (size_t)w * h;
+    const float diag = std::sqrt((float)(w * w + h * h));
+    const int base_kernel = std::max((int)(bloom_radius * diag), 1);
+
+    printf("Bloom: %d octaves, base radius=%d px, strength=%.2f%s, threshold=%.2f\n",
+           bloom_octaves, base_kernel, bloom_strength,
+           bloom_chromatic ? ", chromatic" : "", bloom_thresh);
+
+    // Extract bright pixels into the bloom source buffer
+    std::vector<float> bright_r(np), bright_g(np), bright_b(np);
+#pragma omp parallel for
+    for (int i = 0; i < (int)np; ++i)
+    {
+        float lum = 0.2126f * img_r[i] + 0.7152f * img_g[i] + 0.0722f * img_b[i];
+        if (lum > bloom_thresh)
+        {
+            // Keep the excess above threshold — this drives the glow
+            float excess = (lum - bloom_thresh) / std::max(lum, 1e-10f);
+            bright_r[i] = img_r[i] * excess;
+            bright_g[i] = img_g[i] * excess;
+            bright_b[i] = img_b[i] * excess;
+        }
+    }
+
+    // Chromatic tint table: white-hot → yellow → orange → deep red
+    static const float chroma_r[] = {1.00f, 1.00f, 1.00f, 1.00f, 0.95f, 0.80f};
+    static const float chroma_g[] = {1.00f, 0.90f, 0.65f, 0.40f, 0.20f, 0.10f};
+    static const float chroma_b[] = {1.00f, 0.55f, 0.22f, 0.08f, 0.03f, 0.01f};
+
+    float octave_weight = 1.0f;
+    const float weight_decay = 0.55f;
+
+    for (int oct = 0; oct < bloom_octaves; ++oct)
+    {
+        float oct_radius = (float)base_kernel;
+        for (int k = 0; k < oct; ++k)
+            oct_radius *= 2.5f;
+        int oct_kernel = std::min((int)oct_radius, (int)(diag * 0.25f));
+
+        float oct_sigma = oct_kernel / 3.0f;
+        std::vector<int> box_radii;
+        compute_box_radii(oct_sigma, bloom_passes, box_radii);
+
+        int ci = std::min(oct, 5);
+        float tint_r = bloom_chromatic ? chroma_r[ci] : 1.0f;
+        float tint_g = bloom_chromatic ? chroma_g[ci] : 1.0f;
+        float tint_b = bloom_chromatic ? chroma_b[ci] : 1.0f;
+
+        printf("  octave %d/%d: radius=%d, sigma=%.1f, weight=%.3f",
+               oct + 1, bloom_octaves, oct_kernel, oct_sigma, octave_weight);
+        if (bloom_chromatic)
+            printf(", tint=(%.2f, %.2f, %.2f)", tint_r, tint_g, tint_b);
+        printf("\n");
+
+        std::vector<float> blur_r(bright_r.begin(), bright_r.end());
+        std::vector<float> blur_g(bright_g.begin(), bright_g.end());
+        std::vector<float> blur_b(bright_b.begin(), bright_b.end());
+        std::vector<float> tmp_r(np), tmp_g(np), tmp_b(np);
+
+        for (int pass = 0; pass < bloom_passes; ++pass)
+        {
+            box_blur_pass(blur_r, blur_g, blur_b,
+                          tmp_r, tmp_g, tmp_b,
+                          w, h, box_radii[pass]);
+            std::swap(blur_r, tmp_r);
+            std::swap(blur_g, tmp_g);
+            std::swap(blur_b, tmp_b);
+        }
+
+        const float wr = octave_weight * tint_r * bloom_strength;
+        const float wg = octave_weight * tint_g * bloom_strength;
+        const float wb = octave_weight * tint_b * bloom_strength;
+#pragma omp parallel for
+        for (int i = 0; i < (int)np; ++i)
+        {
+            out_r[i] += wr * blur_r[i];
+            out_g[i] += wg * blur_g[i];
+            out_b[i] += wb * blur_b[i];
+        }
+
+        octave_weight *= weight_decay;
+    }
+
+    // Bloom stats
+    float bmax = 0;
+    int bnonzero = 0;
+    for (size_t i = 0; i < np; ++i)
+    {
+        float v = out_r[i] + out_g[i] + out_b[i];
+        if (v > 0)
+            ++bnonzero;
+        bmax = std::max(bmax, v);
+    }
+    printf("Bloom stats: max=%.4f, nonzero=%d / %zu\n", bmax, bnonzero, np);
 }
 
 // ---- Bright pixel extraction --------------------------------------------
@@ -367,6 +776,13 @@ int main(int argc, char *argv[])
     printf("  ray grid:   %d×%d\n", params.ray_grid, params.ray_grid);
     printf("  downsample: %d×\n", params.downsample);
     printf("  flare gain: %.1f\n", params.flare_gain);
+    if (params.bloom_strength > 0)
+    {
+        printf("  bloom:      strength=%.2f, radius=%.3f, %d octaves, %d passes%s\n",
+               params.bloom_strength, params.bloom_radius,
+               params.bloom_octaves, params.bloom_passes,
+               params.bloom_chromatic ? ", chromatic" : "");
+    }
     if (params.sky_brightness != 1.0f)
         printf("  sky bright: %.3f\n", params.sky_brightness);
 
@@ -547,6 +963,8 @@ int main(int argc, char *argv[])
     gcfg.ray_grid = params.ray_grid;
     gcfg.min_intensity = params.min_ghost;
     gcfg.gain = params.flare_gain;
+    gcfg.ghost_normalize = params.ghost_normalize;
+    gcfg.max_area_boost = params.max_area_boost;
 
     render_ghosts(lens, sources, fov_h, fov_v,
                   flare_r.data(), flare_g.data(), flare_b.data(),
@@ -570,9 +988,29 @@ int main(int argc, char *argv[])
                max_val, nonzero > 0 ? sum_val / nonzero : 0.0f, nonzero, np);
     }
 
+    // ---- Generate bloom ----
+    std::vector<float> bloom_r(np, 0), bloom_g(np, 0), bloom_b(np, 0);
+    if (params.bloom_strength > 0)
+    {
+        float bt = (params.bloom_threshold >= 0) ? params.bloom_threshold : params.threshold;
+        const float *R = img.channels[img.idx_R].data.data();
+        const float *G = img.channels[img.idx_G].data.data();
+        const float *B = img.channels[img.idx_B].data.data();
+        generate_bloom(R, G, B,
+                       bloom_r.data(), bloom_g.data(), bloom_b.data(),
+                       img.width, img.height, bt,
+                       params.bloom_strength, params.bloom_radius,
+                       std::clamp(params.bloom_passes, 1, 10),
+                       std::clamp(params.bloom_octaves, 1, 6),
+                       params.bloom_chromatic);
+    }
+
     // ---- Write output EXR ----
     if (!save_exr(params.output_file.c_str(), img,
-                  flare_r.data(), flare_g.data(), flare_b.data()))
+                  flare_r.data(), flare_g.data(), flare_b.data(),
+                  params.bloom_strength > 0 ? bloom_r.data() : nullptr,
+                  params.bloom_strength > 0 ? bloom_g.data() : nullptr,
+                  params.bloom_strength > 0 ? bloom_b.data() : nullptr))
         return 1;
 
     // ---- Write composited TGA ----
@@ -589,9 +1027,9 @@ int main(int argc, char *argv[])
         std::vector<unsigned char> pixels(np * 3);
         for (size_t i = 0; i < np; ++i)
         {
-            float r = (beauty_r[i] + flare_r[i]) * exp;
-            float g = (beauty_g[i] + flare_g[i]) * exp;
-            float b = (beauty_b[i] + flare_b[i]) * exp;
+            float r = (beauty_r[i] + flare_r[i] + bloom_r[i]) * exp;
+            float g = (beauty_g[i] + flare_g[i] + bloom_g[i]) * exp;
+            float b = (beauty_b[i] + flare_b[i] + bloom_b[i]) * exp;
 
             // Tonemap: log(1 + cx) / log(1 + c)
             r = std::log(1.0f + c * std::max(r, 0.0f)) * norm;

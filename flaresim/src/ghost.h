@@ -30,6 +30,11 @@ struct GhostConfig
     float min_intensity = 1e-7f;                     // skip ghost pairs dimmer than this
     float gain = 1000.0f;                            // ghost intensity multiplier
     float wavelengths[3] = {650.0f, 550.0f, 450.0f}; // R, G, B in nm
+
+    // Per-pair area normalization: boost defocused ghost pairs so they remain
+    // visible.  Production renderers (ILM, Weta) use a similar technique.
+    bool ghost_normalize = true;   // enable per-pair area correction
+    float max_area_boost = 100.0f; // clamp the correction factor
 };
 
 // Enumerate all valid ghost bounce pairs for the lens system.

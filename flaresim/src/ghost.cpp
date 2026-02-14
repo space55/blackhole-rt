@@ -95,6 +95,72 @@ static float estimate_ghost_intensity(const LensSystem &lens,
 }
 
 // ---------------------------------------------------------------------------
+// Estimate the ghost image spread for a bounce pair relative to the sensor.
+//
+// Traces a coarse grid of on-axis rays across the entrance pupil and
+// measures the bounding box of sensor landing positions.  Returns a
+// correction factor = ghost_area / sensor_area, clamped to [1, max_boost].
+//
+// Defocused ghost pairs produce images much larger than the sensor,
+// diluting per-pixel brightness.  This correction factor compensates
+// for that geometric dilution so all ghost pairs remain visible.
+// ---------------------------------------------------------------------------
+
+static float estimate_ghost_spread(const LensSystem &lens,
+                                   int bounce_a, int bounce_b,
+                                   float sensor_half_w, float sensor_half_h,
+                                   const GhostConfig &config)
+{
+    constexpr int G = 8; // coarse grid for spread estimation
+    float front_R = lens.surfaces[0].semi_aperture;
+    float start_z = lens.surfaces[0].z - 20.0f;
+
+    float min_x = 1e30f, max_x = -1e30f;
+    float min_y = 1e30f, max_y = -1e30f;
+    int valid_count = 0;
+
+    for (int gy = 0; gy < G; ++gy)
+    {
+        for (int gx = 0; gx < G; ++gx)
+        {
+            float u = ((gx + 0.5f) / G) * 2.0f - 1.0f;
+            float v = ((gy + 0.5f) / G) * 2.0f - 1.0f;
+            if (u * u + v * v > 1.0f)
+                continue;
+
+            Ray ray;
+            ray.origin = Vec3f(u * front_R, v * front_R, start_z);
+            ray.dir = Vec3f(0, 0, 1); // on-axis
+
+            // Use green wavelength for spread estimation
+            TraceResult res = trace_ghost_ray(ray, lens, bounce_a, bounce_b,
+                                              config.wavelengths[1]);
+            if (!res.valid)
+                continue;
+
+            min_x = std::min(min_x, res.position.x);
+            max_x = std::max(max_x, res.position.x);
+            min_y = std::min(min_y, res.position.y);
+            max_y = std::max(max_y, res.position.y);
+            ++valid_count;
+        }
+    }
+
+    if (valid_count < 2)
+        return 1.0f; // too few hits to estimate
+
+    float ghost_w = std::max(max_x - min_x, 0.01f);
+    float ghost_h = std::max(max_y - min_y, 0.01f);
+    float sensor_w = 2.0f * sensor_half_w;
+    float sensor_h = 2.0f * sensor_half_h;
+
+    // Correction = how much larger the ghost image is than the sensor.
+    // Clamped to [1, max_boost] — never dim a focused ghost, and cap the boost.
+    float area_ratio = (ghost_w * ghost_h) / (sensor_w * sensor_h);
+    return std::clamp(area_ratio, 1.0f, config.max_area_boost);
+}
+
+// ---------------------------------------------------------------------------
 // Render all ghost reflections.
 // ---------------------------------------------------------------------------
 
@@ -144,6 +210,7 @@ void render_ghosts(const LensSystem &lens,
 
     // Pre-filter ghost pairs
     std::vector<GhostPair> active_pairs;
+    std::vector<float> pair_area_boost; // per-pair area correction factor
     for (auto &p : pairs)
     {
         // Skip pairs where either bounce surface has n1 ≈ n2 (air-to-air),
@@ -161,10 +228,32 @@ void render_ghosts(const LensSystem &lens,
 
         float est = estimate_ghost_intensity(lens, p.surf_a, p.surf_b, config);
         if (est >= config.min_intensity)
+        {
+            // Estimate defocus spread and compute area correction
+            float boost = 1.0f;
+            if (config.ghost_normalize)
+            {
+                boost = estimate_ghost_spread(lens, p.surf_a, p.surf_b,
+                                              sensor_half_w, sensor_half_h,
+                                              config);
+            }
             active_pairs.push_back(p);
+            pair_area_boost.push_back(boost);
+        }
     }
     printf("Active ghost pairs (above %.1e threshold): %zu / %zu\n",
            config.min_intensity, active_pairs.size(), pairs.size());
+    if (config.ghost_normalize)
+    {
+        printf("Area normalization: ON (max boost %.0f×)\n", config.max_area_boost);
+        for (size_t i = 0; i < active_pairs.size(); ++i)
+        {
+            if (pair_area_boost[i] > 1.01f)
+                printf("  pair (%d,%d): area boost %.1f×\n",
+                       active_pairs[i].surf_a, active_pairs[i].surf_b,
+                       pair_area_boost[i]);
+        }
+    }
 
     auto t0 = std::chrono::steady_clock::now();
 
@@ -173,9 +262,10 @@ void render_ghosts(const LensSystem &lens,
     {
         int a = active_pairs[pi].surf_a;
         int b = active_pairs[pi].surf_b;
+        float area_boost = pair_area_boost[pi];
 
-        printf("  [%zu/%zu] Ghost pair (%d, %d) ...",
-               pi + 1, active_pairs.size(), a, b);
+        printf("  [%zu/%zu] Ghost pair (%d, %d) [area ×%.1f] ...",
+               pi + 1, active_pairs.size(), a, b, area_boost);
         fflush(stdout);
 
         auto tp0 = std::chrono::steady_clock::now();
@@ -246,7 +336,7 @@ void render_ghosts(const LensSystem &lens,
                         // Source intensity for this channel
                         float src_i = (ch == 0) ? src.r : (ch == 1) ? src.g
                                                                     : src.b;
-                        float contribution = src_i * res.weight * ray_weight * config.gain;
+                        float contribution = src_i * res.weight * ray_weight * config.gain * area_boost;
 
                         if (contribution < 1e-12f)
                             continue;
