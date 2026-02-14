@@ -1,5 +1,5 @@
 cmake_minimum_required(VERSION 3.18)
-project(bhrt-tools LANGUAGES CXX)
+project(flaresim LANGUAGES CXX)
 
 set(CMAKE_CXX_STANDARD 20)
 set(CMAKE_CXX_STANDARD_REQUIRED TRUE)
@@ -8,7 +8,6 @@ if(NOT CMAKE_BUILD_TYPE)
     set(CMAKE_BUILD_TYPE Release)
 endif()
 
-# Match main project optimisation flags
 if(CMAKE_BUILD_TYPE MATCHES Debug)
     set(CMAKE_CXX_FLAGS "${CMAKE_CXX_FLAGS} -g -Wall -Wextra")
 else()
@@ -26,10 +25,16 @@ endif()
 find_package(OpenEXR 3 REQUIRED)
 find_package(OpenMP)
 
-# --- Grade tool (bloom + lens flare + grading) ----------------------------
-add_executable(bhrt-grade grade.cpp)
-target_include_directories(bhrt-grade PRIVATE "${CMAKE_SOURCE_DIR}/../lib")
-target_link_libraries(bhrt-grade OpenEXR::OpenEXR)
+# --- Flare simulator ------------------------------------------------------
+add_executable(flaresim
+    src/main.cpp
+    src/lens.cpp
+    src/trace.cpp
+    src/ghost.cpp
+    src/stb_impl.cpp
+)
+target_include_directories(flaresim PRIVATE src "${CMAKE_SOURCE_DIR}/../lib")
+target_link_libraries(flaresim OpenEXR::OpenEXR)
 if(OpenMP_CXX_FOUND)
-    target_link_libraries(bhrt-grade OpenMP::OpenMP_CXX)
+    target_link_libraries(flaresim OpenMP::OpenMP_CXX)
 endif()

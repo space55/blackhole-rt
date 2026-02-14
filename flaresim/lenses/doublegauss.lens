@@ -1,0 +1,26 @@
+# Double Gauss — 58mm f/2
+#
+# Classic 6-element symmetric design (Biotar / Planar family).
+# 10 refractive surfaces + aperture stop = 11 surfaces total.
+# Produces 55 ghost bounce pairs — the extra elements create richer
+# ghost patterns with more complex chromatic structure.
+#
+# This is an approximate prescription for educational/artistic use.
+# Based loosely on the Zeiss Biotar 58mm f/2 layout.
+
+name: Double Gauss 58mm f/2
+focal_length: 58.0
+
+surfaces:
+# radius    thickness   ior     abbe    semi_ap  coating
+  39.68     8.36        1.670   47.2    25.0     1
+  152.73    0.20        1.000   0.0     25.0     0
+  31.58     7.38        1.670   47.2    21.0     1
+  0         4.10        1.699   30.1    21.0     1
+  -1000.0   16.50       1.000   0.0     14.0     0
+  stop      12.13       1.000   0.0     12.0     0
+  -25.46    1.82        1.603   38.0    14.0     1
+  79.49     12.70       1.658   50.9    17.0     1
+  -37.56    0.40        1.000   0.0     17.0     0
+  1000.0    6.60        1.717   47.9    20.0     1
+  -50.61    38.00       1.000   0.0     20.0     0

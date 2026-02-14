@@ -58,7 +58,8 @@ int main(int argc, char *argv[])
         cfg.disk_flat_mode);
 
     printf("Black hole: M=%.1f, a=%.2f, r+=%.4f, r_isco=%.4f\n",
-           pp.bh_mass, pp.bh_spin, pp.r_plus, pp.disk_inner_r);
+           pp.bh_mass, pp.bh_spin, pp.r_plus, pp.
+        );
 
     // --- Derived constants from config -----------------------------------
     const int out_width = cfg.output_width;

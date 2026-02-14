@@ -20,114 +20,117 @@ cmake --build .
 
 ---
 
-## bhrt-bloom
+## bhrt-grade
 
-Reads a linear-light EXR file and applies configurable bloom, exposure, tonemapping, and sky brightness adjustments. Supports outputting to multiple formats.
+Unified post-processor combining bloom, lens flare, and grading in a single pass. This avoids the texture-blurring problem that arises when chaining `bhrt-bloom` and `bhrt-lensflare` separately (bloom softens the beauty pass, then flare reads from the softened result, compounding blur; exposure/tonemap also get applied twice).
 
 ### Usage
 
 ```bash
-bhrt-bloom input.exr output.[tga|exr|hdr] [options]
+bhrt-grade input.exr output.[tga|exr|hdr] [options]
 ```
-
-The output format is determined by file extension:
-
-| Extension | Format               | Notes                                      |
-| --------- | -------------------- | ------------------------------------------ |
-| `.tga`    | 8-bit TGA            | Auto-tonemaps if `--tonemap` not specified |
-| `.exr`    | Float32 EXR          | Preserves all layers from input            |
-| `.hdr`    | Float32 Radiance HDR | Beauty pass (R,G,B) only                   |
-
-### Options
-
-| Option                 | Default   | Description                                                                                                                                                  |
-| ---------------------- | --------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------ |
-| `--strength <f>`       | `0.8`     | Bloom mix intensity                                                                                                                                          |
-| `--threshold <f>`      | `1.0`     | Luminance cutoff — pixels brighter than this contribute to bloom                                                                                             |
-| `--radius <f>`         | `0.02`    | Blur radius as fraction of image diagonal (0.01 = tight, 0.1 = wide)                                                                                         |
-| `--passes <n>`         | `3`       | Number of box-blur passes (1–10, more = smoother Gaussian)                                                                                                   |
-| `--tonemap <f>`        | `0` (off) | Log tonemap compression (same formula as renderer: 0 = off, 1 = heavy)                                                                                       |
-| `--exposure <f>`       | `1.0`     | Linear exposure multiplier applied before bloom                                                                                                              |
-| `--sky-brightness <f>` | `1.0`     | Sky brightness multiplier (requires `disk.*` and `sky.*` EXR layers)                                                                                         |
-| `--octaves <n>`        | `4`       | Bloom scale octaves (1–6). More = wider atmospheric wash                                                                                                     |
-| `--chromatic`          | off       | Chromatic bloom: shifts warm (white→yellow→orange→red) at wider scales                                                                                       |
-| `--interstellar`       |           | Preset: overexposed fire-glow look (sets strength=2.5 threshold=0.3 radius=0.06 octaves=5 exposure=3.0 chromatic=on tonemap=1.2). Individual flags override. |
-| `--help`               |           | Print usage and exit                                                                                                                                         |
 
 ### Processing Pipeline
 
-Operations are applied in this order:
+1. **Sky brightness** — Recomposites from `disk.*` + `sky.*` layers.
+2. **Exposure** — Multiplies beauty RGB.
+3. **Bright pixel extraction** — One shared threshold pass feeds both bloom and flare.
+4. **Bloom** — Multi-octave box-blur with optional chromatic warm shift.
+5. **Lens flare** — Ghosts, halo, starburst, anamorphic streak.
+6. **Composite** — Adds all effects onto the original beauty pass (single pass).
+7. **Tonemap** — Log compression.
+8. **Output** — TGA/EXR/HDR.
 
-1. **Sky brightness** — Recomposites the beauty pass from disk + sky layers: `beauty = disk + sky × sky_brightness`. Requires `disk.R/G/B` and `sky.R/G/B` layers in the input EXR (written by bhrt3).
-2. **Exposure** — Multiplies beauty RGB by the exposure value.
-3. **Bloom** — Extracts pixels above threshold, applies multi-pass box blur (Gaussian approximation), composites back at the given strength.
-4. **Tonemap** — Applies logarithmic compression: `log(1 + cx) / log(1 + c)` where `c = 10^(2 × compression) - 1`.
-5. **Output** — Writes the result in the format determined by file extension. TGA auto-tonemaps with compression=1.0 if no explicit `--tonemap` was given.
+### Options
+
+**General:**
+
+| Option                 | Default   | Description                                                      |
+| ---------------------- | --------- | ---------------------------------------------------------------- |
+| `--threshold <f>`      | `1.0`     | Shared luminance threshold for bloom + flare sources             |
+| `--exposure <f>`       | `1.0`     | Exposure multiplier                                              |
+| `--tonemap <f>`        | `0` (off) | Log tonemap compression                                          |
+| `--sky-brightness <f>` | `1.0`     | Sky brightness multiplier (requires `disk.*`/`sky.*` EXR layers) |
+
+**Bloom:**
+
+| Option                 | Default | Description                                                |
+| ---------------------- | ------- | ---------------------------------------------------------- |
+| `--bloom-strength <f>` | `0.8`   | Bloom intensity (0 = off)                                  |
+| `--bloom-radius <f>`   | `0.02`  | Base radius as fraction of diagonal                        |
+| `--bloom-passes <n>`   | `3`     | Box-blur passes (1–10)                                     |
+| `--bloom-octaves <n>`  | `4`     | Scale octaves (1–6)                                        |
+| `--chromatic`          | off     | Chromatic bloom shift (white→yellow→orange→red per octave) |
+
+**Ghost reflections:**
+
+| Option                  | Default | Description                                |
+| ----------------------- | ------- | ------------------------------------------ |
+| `--ghosts <n>`          | `0`     | Number of ghost reflections (0 = off)      |
+| `--ghost-dispersal <f>` | `0.35`  | Spacing between ghosts along the flip axis |
+| `--ghost-intensity <f>` | `0.15`  | Ghost brightness                           |
+| `--ghost-chromatic <f>` | `0.01`  | Chromatic aberration spread per ghost      |
+
+**Halo ring:**
+
+| Option                 | Default | Description                         |
+| ---------------------- | ------- | ----------------------------------- |
+| `--halo-radius <f>`    | `0.45`  | Ring radius as fraction of diagonal |
+| `--halo-width <f>`     | `0.07`  | Ring softness (Gaussian σ)          |
+| `--halo-intensity <f>` | `0`     | Ring brightness (0 = off)           |
+
+**Starburst diffraction:**
+
+| Option                      | Default | Description                          |
+| --------------------------- | ------- | ------------------------------------ |
+| `--starburst-rays <n>`      | `0`     | Number of diffraction rays (0 = off) |
+| `--starburst-intensity <f>` | `0.3`   | Ray brightness                       |
+| `--starburst-length <f>`    | `0.3`   | Ray length as fraction of diagonal   |
+| `--starburst-width <f>`     | `0.008` | Angular width of each ray            |
+
+**Anamorphic streak:**
+
+| Option                    | Default       | Description                              |
+| ------------------------- | ------------- | ---------------------------------------- |
+| `--streak`                | off           | Enable horizontal anamorphic streak      |
+| `--streak-intensity <f>`  | `0.25`        | Streak brightness                        |
+| `--streak-length <f>`     | `0.5`         | Streak length as fraction of image width |
+| `--streak-tint-r/g/b <f>` | `0.6 0.7 1.0` | Streak colour (default: cool blue)       |
+
+**Presets:**
+
+| Option           | Description                                                               |
+| ---------------- | ------------------------------------------------------------------------- |
+| `--interstellar` | Full cinematic look: chromatic bloom + streak + ghosts + halo + starburst |
 
 ### Examples
 
-**Basic bloom to TGA:**
+**Full cinematic grade in one shot:**
 
 ```bash
-bhrt-bloom output.exr result.tga --strength 0.8 --threshold 1.0
+bhrt-grade output.exr final.tga --interstellar
 ```
 
-**Heavy cinematic bloom with wide radius:**
+**Interstellar with custom sky brightness:**
 
 ```bash
-bhrt-bloom output.exr result.tga --strength 1.5 --radius 0.1 --threshold 0.5
+bhrt-grade output.exr final.tga --interstellar --sky-brightness 0.3
 ```
 
-**Adjust sky brightness and export tonemapped TGA:**
+**Bloom only (no flare):**
 
 ```bash
-bhrt-bloom output.exr result.tga --sky-brightness 0.3 --tonemap 1.0
+bhrt-grade output.exr result.tga --bloom-strength 1.5 --bloom-radius 0.08 --chromatic --exposure 3.0 --tonemap 1.0
 ```
 
-**Re-grade to a new EXR (preserves all layers):**
+**Flare only (no bloom):**
 
 ```bash
-bhrt-bloom output.exr graded.exr --exposure 2.0 --sky-brightness 0.5 --strength 0.0
+bhrt-grade output.exr result.tga --bloom-strength 0 --ghosts 6 --halo-intensity 0.15 --streak --exposure 2.0 --tonemap 1.0
 ```
 
-**Bloom-only pass (no tonemap) to HDR:**
+**Bloom + streak (no ghosts/halo):**
 
 ```bash
-bhrt-bloom output.exr bloomed.hdr --strength 1.0 --threshold 0.8
+bhrt-grade output.exr result.tga --chromatic --bloom-strength 2.0 --streak --streak-intensity 0.4 --exposure 3.0 --tonemap 1.2
 ```
-
-**Interstellar preset (one-shot cinematic fire-glow):**
-
-```bash
-bhrt-bloom output.exr interstellar.tga --interstellar
-```
-
-**Interstellar preset with custom sky brightness:**
-
-```bash
-bhrt-bloom output.exr interstellar.tga --interstellar --sky-brightness 0.3
-```
-
-**Chromatic bloom with manual tuning:**
-
-```bash
-bhrt-bloom output.exr result.tga --chromatic --strength 2.0 --exposure 4.0 --radius 0.06 --octaves 5 --threshold 0.5
-```
-
-### EXR Layer Handling
-
-When the input EXR contains separate layers written by bhrt3:
-
-| Layer         | Usage                                                                |
-| ------------- | -------------------------------------------------------------------- |
-| `R`, `G`, `B` | Beauty pass — modified by all operations                             |
-| `A`           | Alpha — passed through unchanged                                     |
-| `disk.R/G/B`  | Raw disk emission — used to recomposite with `--sky-brightness`      |
-| `disk.A`      | Disk opacity — passed through unchanged                              |
-| `sky.R/G/B`   | Sky contribution — scaled by `--sky-brightness`, then passed through |
-
-If `--sky-brightness` is not 1.0, the beauty pass is recomposited from the disk and sky layers. The `sky.*` channels in the output are also updated to reflect the new brightness.
-
-When outputting to EXR, **all channels** from the input are preserved in the output, including any layers not listed above.
-
-If the input EXR doesn't have `disk.*`/`sky.*` layers (e.g. from a different renderer), `--sky-brightness` is skipped with a warning.
