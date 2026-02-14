@@ -15,7 +15,6 @@ Lens flares are computed by sequential ray tracing through every ghost bounce pa
 - **Area normalization** — per-pair defocus compensation (ILM/Weta-style technique)
 - **Multi-layer EXR I/O** — reads bhrt3 layers, writes `flare.R/G/B` alongside originals
 - **Optional TGA output** — composited beauty + flare, tonemapped to 8-bit
-- **GPU acceleration** — optional CUDA backend for ghost ray tracing on NVIDIA GPUs
 - **CPU parallelism** — OpenMP for multi-core rendering
 - **Config file + CLI overrides** — same `key = value` format as bhrt3
 
@@ -28,7 +27,6 @@ Lens flares are computed by sequential ray tracing through every ghost bounce pa
 ### Optional
 
 - **OpenMP** — multi-threaded CPU rendering (strongly recommended)
-- **CUDA toolkit** — for GPU-accelerated ghost tracing
 
 ### macOS (Homebrew)
 
@@ -55,15 +53,9 @@ The binary `flaresim` will be created in `flaresim/build/`.
 
 ### Build options
 
-| Option              | Default   | Description                                    |
-| ------------------- | --------- | ---------------------------------------------- |
-| `FLARESIM_USE_CUDA` | `OFF`     | Enable CUDA GPU ghost ray tracing              |
-| `CMAKE_BUILD_TYPE`  | `Release` | `Release` for optimised, `Debug` for debugging |
-
-```bash
-# GPU build (requires CUDA toolkit — Linux/Windows only, not macOS)
-cmake .. -DFLARESIM_USE_CUDA=ON
-```
+| Option             | Default   | Description                                    |
+| ------------------ | --------- | ---------------------------------------------- |
+| `CMAKE_BUILD_TYPE` | `Release` | `Release` for optimised, `Debug` for debugging |
 
 ## Usage
 
@@ -215,20 +207,11 @@ Flaresim preserves all input EXR channels and adds:
 
 The `flare` layer can be composited additively onto the beauty pass in any grading/compositing tool.
 
-## GPU Acceleration
-
-When built with `-DFLARESIM_USE_CUDA=ON`, ghost ray tracing runs on the GPU. The program automatically falls back to CPU if CUDA is unavailable at runtime.
-
-The CUDA kernel traces all rays for all ghost pairs in parallel, while the adaptive splatting step runs on the CPU. This provides significant speedups for high `rays` grid sizes and complex lenses with many ghost pairs.
-
-> **Note:** CUDA is not available on macOS. Use Metal for local GPU work or
-> CUDA on Linux/Windows nodes in a cluster setup (see [slurm/](../slurm/README.md)).
-
 ## Project Structure
 
 ```
 flaresim/
-├── CMakeLists.txt          # Build configuration (optional CUDA)
+├── CMakeLists.txt          # Build configuration
 ├── flaresim.conf           # Example configuration file
 ├── README.md               # This file
 ├── src/
@@ -241,8 +224,6 @@ flaresim/
 │   ├── ghost.h             # Ghost renderer interface
 │   ├── fresnel.h           # Fresnel reflectance + Cauchy dispersion
 │   ├── vec3.h              # 3D vector math
-│   ├── gpu_ghosts.h        # CUDA ghost interface (GPU structs + dispatch)
-│   ├── gpu_ghosts.cu       # CUDA ghost ray tracing kernel
 │   └── stb_impl.cpp        # stb library implementations
 └── lenses/
     ├── doublegauss.lens     # Double Gauss 58mm f/2
