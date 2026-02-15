@@ -48,8 +48,8 @@ struct PhysicsParams
 
     // LOD / anti-aliasing: camera info for procedural texture frequency clamping.
     // When pixel_angle > 0, high-frequency texture terms are faded to prevent moiré.
-    double cam_x = 0, cam_y = 0, cam_z = 0;
-    double pixel_angle = 0; // radians per pixel (fov_x / output_width), 0 = no LOD
+    double cam_x, cam_y, cam_z;
+    double pixel_angle; // radians per pixel (fov_x / output_width), 0 = no LOD
 };
 
 // ============================================================================
