@@ -87,11 +87,6 @@ __global__ __launch_bounds__(256, 2) void render_kernel(GPUPixelResult *results,
     // Hard iteration cap to bound worst-case rays near the photon sphere
     const int max_iter = 50000;
 
-    // Per-thread progress accumulator — batched writes reduce global
-    // atomic traffic ~32×.  The host polls progress every 250 ms, so
-    // slightly delayed counts are invisible to the user.
-    int local_progress = 0;
-
     // Persistent work loop — each thread grabs one pixel at a time
     while (true)
     {
@@ -263,17 +258,9 @@ __global__ __launch_bounds__(256, 2) void render_kernel(GPUPixelResult *results,
         results[idx].exit_vy = (float)pixel_exit_dir.y;
         results[idx].exit_vz = (float)pixel_exit_dir.z;
 
-        // Batched progress update — flush every 32 pixels
-        if (++local_progress >= 32)
-        {
-            atomicAdd(progress, local_progress);
-            local_progress = 0;
-        }
+        // Update progress counter (visible to host via mapped pinned memory)
+        atomicAdd(progress, 1);
     }
-
-    // Flush remaining progress counts from this thread
-    if (local_progress > 0)
-        atomicAdd(progress, local_progress);
 }
 
 // ============================================================================
