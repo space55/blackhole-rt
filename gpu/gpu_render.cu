@@ -58,33 +58,63 @@ __global__ __launch_bounds__(256, 2) void render_kernel(GPUPixelResult *results,
                                                         int *work_counter,
                                                         int total_pixels)
 {
-    // Local copy of physics params (fast reads from constant memory into registers)
-    const PhysicsParams pp = c_params.physics;
+    // ====================================================================
+    // Shared-memory scene parameters — one copy per block (~328 bytes)
+    //
+    // PhysicsParams alone has 19 doubles + 1 int; combined with camera
+    // vectors and render scalars the old register-copy approach consumed
+    // ~80 of the 128-register budget (launch_bounds 256,2).  That left
+    // <50 registers for Kerr metric temporaries and procedural-texture
+    // maths — causing the compiler to spill to local memory (DRAM-backed,
+    // ~200+ cycle reads).
+    //
+    // Keeping the immutable parameters in shared memory (one copy shared
+    // by all 256 threads in the block) frees those registers.  Shared-
+    // memory reads are ~20 cycles — 10× cheaper than local-memory
+    // spills — and the compute-heavy loop body has enough ILP to hide
+    // the latency.
+    // ====================================================================
+    __shared__ GPUSceneParams s_params;
+    if (threadIdx.x == 0)
+        s_params = c_params;
+    __syncthreads();
 
-    // Camera basis vectors (from constant memory)
-    const dvec3 cam_right(c_params.cam_right[0], c_params.cam_right[1], c_params.cam_right[2]);
-    const dvec3 cam_up(c_params.cam_up[0], c_params.cam_up[1], c_params.cam_up[2]);
-    const dvec3 cam_fwd(c_params.cam_fwd[0], c_params.cam_fwd[1], c_params.cam_fwd[2]);
-    const dvec3 cam_pos(c_params.cam_pos[0], c_params.cam_pos[1], c_params.cam_pos[2]);
+    // Reference to shared memory — physics.h functions that take
+    // `const PhysicsParams &` read directly from shared memory, letting
+    // the compiler register-cache only the fields it actually needs in
+    // hot paths (bh_spin, bh_mass in geodesic_accel; disk bounds in the
+    // step-size logic) while cold fields stay in shared memory.
+    const PhysicsParams &pp = s_params.physics;
 
-    const int width = c_params.width;
-    const int aa_grid = c_params.aa_grid;
+    // Camera basis vectors (constructed from shared memory; live only
+    // during init_ray calls, compiler can reclaim the registers after)
+    const dvec3 cam_right(s_params.cam_right[0], s_params.cam_right[1], s_params.cam_right[2]);
+    const dvec3 cam_up(s_params.cam_up[0], s_params.cam_up[1], s_params.cam_up[2]);
+    const dvec3 cam_fwd(s_params.cam_fwd[0], s_params.cam_fwd[1], s_params.cam_fwd[2]);
+    const dvec3 cam_pos(s_params.cam_pos[0], s_params.cam_pos[1], s_params.cam_pos[2]);
+
+    const int width = s_params.width;
+    const int aa_grid = s_params.aa_grid;
     const double inv_aa = 1.0 / aa_grid;
     const double inv_spp = 1.0 / (double)(aa_grid * aa_grid);
 
+    // Hot inner-loop constants — kept in registers (read every step)
     const double r_plus = pp.r_plus;
-    const double base_dt = c_params.base_dt;
-    const double max_affine = c_params.max_affine;
-    const double escape_r2 = c_params.escape_r2;
-    const double width_d = (double)c_params.width;
-    const double height_d = (double)c_params.height;
-    const double fov_x = c_params.fov_x;
-    const double fov_y = c_params.fov_y;
+    const double base_dt = s_params.base_dt;
+    const double max_affine = s_params.max_affine;
+    const double escape_r2 = s_params.escape_r2;
+    const double width_d = (double)s_params.width;
+    const double height_d = (double)s_params.height;
+    const double fov_x = s_params.fov_x;
+    const double fov_y = s_params.fov_y;
 
     // Hard iteration cap to bound worst-case rays near the photon sphere
     const int max_iter = 50000;
 
-    __syncthreads(); // ensure all threads start together
+    // Per-thread progress accumulator — batched writes reduce global
+    // atomic traffic ~32×.  The host polls progress every 250 ms, so
+    // slightly delayed counts are invisible to the user.
+    int local_progress = 0;
 
     // Persistent work loop — each thread grabs one pixel at a time
     while (true)
@@ -134,14 +164,42 @@ __global__ __launch_bounds__(256, 2) void render_kernel(GPUPixelResult *results,
                         const double y_dist = fabs(pos.y);
                         if (y_dist < 5.0 * h)
                         {
-                            step_dt = fmin(step_dt, fmax(0.3 * h, 0.005));
+                            step_dt = fmin(step_dt, fmax(0.15 * h, 0.001));
+
+                            // Grazing-angle refinement
+                            const double v_horiz_sq = vel.x * vel.x + vel.z * vel.z;
+                            const double v_vert_sq = vel.y * vel.y;
+                            if (v_horiz_sq > 4.0 * v_vert_sq)
+                            {
+                                const double v_horiz = sqrt(v_horiz_sq);
+                                const double texture_scale = pp.disk_flat_mode ? 0.15 : 0.3;
+                                step_dt = fmin(step_dt, texture_scale / v_horiz);
+                            }
                         }
                     }
+
+                    const double prev_y = pos.y;
 
                     if (!advance_ray(pos, vel, cached_r, step_dt, pp))
                     {
                         hit_bh = true;
                         break;
+                    }
+
+                    // Midplane crossing sub-step for flat mode
+                    if (pp.disk_flat_mode && prev_y * pos.y < 0.0)
+                    {
+                        if (cached_r >= (pp.disk_inner_r * 0.4) &&
+                            cached_r <= (pp.disk_outer_r * 1.6))
+                        {
+                            const double t_cross = fabs(prev_y) /
+                                                   fmax(fabs(prev_y) + fabs(pos.y), 1e-12);
+                            dvec3 mid_pos = (1.0 - t_cross) * (pos - step_dt * vel) +
+                                            t_cross * pos;
+                            mid_pos.y = 0.0;
+                            sample_disk_volume(mid_pos, vel, step_dt * 0.5,
+                                               acc_color, acc_opacity, cached_r, pp);
+                        }
                     }
 
                     // Validate ray state BEFORE disk sampling.  Under
@@ -229,9 +287,17 @@ __global__ __launch_bounds__(256, 2) void render_kernel(GPUPixelResult *results,
         results[idx].exit_vy = (float)pixel_exit_dir.y;
         results[idx].exit_vz = (float)pixel_exit_dir.z;
 
-        // Update progress counter (visible to host via mapped pinned memory)
-        atomicAdd(progress, 1);
+        // Batched progress update — flush every 32 pixels
+        if (++local_progress >= 32)
+        {
+            atomicAdd(progress, local_progress);
+            local_progress = 0;
+        }
     }
+
+    // Flush remaining progress counts from this thread
+    if (local_progress > 0)
+        atomicAdd(progress, local_progress);
 }
 
 // ============================================================================

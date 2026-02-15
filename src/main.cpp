@@ -72,6 +72,12 @@ int main(int argc, char *argv[])
     const double fov_y = cfg.fov_y;
     const dvec3 camera_pos(cfg.camera_x, cfg.camera_y, cfg.camera_z);
 
+    // --- LOD: set camera info for procedural texture anti-aliasing -------
+    pp.cam_x = cfg.camera_x;
+    pp.cam_y = cfg.camera_y;
+    pp.cam_z = cfg.camera_z;
+    pp.pixel_angle = fov_x / out_width;
+
     // Precompute camera rotation matrix once (avoids trig per ray)
     const dmat3 cam_rot_matrix = dmat3::rotation_y(cfg.camera_yaw * M_PI / 180.0) *
                                  dmat3::rotation_x(cfg.camera_pitch * M_PI / 180.0) *
@@ -215,14 +221,59 @@ int main(int argc, char *argv[])
                             const double y_dist = fabs(pos.y);
                             if (y_dist < 5.0 * h)
                             {
-                                step_dt = std::min(step_dt, std::max(0.3 * h, 0.005));
+                                // Base refinement: fraction of disk thickness
+                                step_dt = std::min(step_dt, std::max(0.15 * h, 0.001));
+
+                                // Grazing-angle refinement: when the ray travels
+                                // nearly parallel to the disk plane, the horizontal
+                                // texture changes fast relative to vertical progress.
+                                // Limit step so we don't skip more than ~0.3 M of
+                                // horizontal distance per step (resolves procedural
+                                // texture at all camera angles).
+                                const double v_horiz_sq = vel.x * vel.x + vel.z * vel.z;
+                                const double v_vert_sq = vel.y * vel.y;
+                                if (v_horiz_sq > 4.0 * v_vert_sq)
+                                {
+                                    // Ray is nearly horizontal — cap step by
+                                    // horizontal texture scale (not disk thickness)
+                                    const double v_horiz = sqrt(v_horiz_sq);
+                                    const double texture_scale = pp.disk_flat_mode ? 0.15 : 0.3;
+                                    step_dt = std::min(step_dt, texture_scale / v_horiz);
+                                }
                             }
                         }
+
+                        // Midplane crossing sub-step: when the ray crosses
+                        // y=0 during a step, the thin flat disk can be stepped
+                        // over entirely.  Detect the crossing and insert an
+                        // extra sample at the midplane so adjacent pixels don't
+                        // get different hit/miss results (= ladder artifact).
+                        const double prev_y = pos.y;
 
                         if (!advance_ray(pos, vel, cached_ks_r, step_dt, pp))
                         {
                             hit_black_hole = true;
                             break;
+                        }
+
+                        // If the ray crossed y=0 and we're in the disk radial
+                        // range, insert an interpolated midplane sample.
+                        if (pp.disk_flat_mode && prev_y * pos.y < 0.0)
+                        {
+                            const double cross_r = cached_ks_r;
+                            if (cross_r >= (pp.disk_inner_r * 0.4) &&
+                                cross_r <= (pp.disk_outer_r * 1.6))
+                            {
+                                // Linearly interpolate to the y=0 crossing
+                                const double t_cross = fabs(prev_y) /
+                                                       fmax(fabs(prev_y) + fabs(pos.y), 1e-12);
+                                dvec3 mid_pos = (1.0 - t_cross) * (pos - step_dt * vel) +
+                                                t_cross * pos;
+                                mid_pos.y = 0.0; // exactly on midplane
+                                sample_disk_volume(mid_pos, vel, step_dt * 0.5,
+                                                   acc_color, acc_opacity,
+                                                   cross_r, pp);
+                            }
                         }
 
                         // Sample disk emission along the ray — cheap guard

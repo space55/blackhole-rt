@@ -97,7 +97,7 @@ fi
 
 ffmpeg -y \
     -framerate "$FPS" \
-    "${EXTRA_INPUT_ARGS[@]}" \
+    ${EXTRA_INPUT_ARGS[@]+"${EXTRA_INPUT_ARGS[@]}"} \
     -i "${FRAMES_DIR}/${PREFIX}_%04d.${FORMAT}" \
     -c:v libx264 \
     -preset slow \
