@@ -11,8 +11,7 @@ Generates a minimal test EXR file with a single extremely bright pixel — usefu
 ```bash
 cd tools/flaretest
 mkdir -p build && cd build
-cmake ..
-cmake --build .
+cmake .. && cmake --build .
 ```
 
 ### Usage
@@ -39,3 +38,43 @@ cd ../../../flaresim/build
 ```
 
 This produces an EXR with ghost reflections from a single point source — ideal for inspecting individual ghost shapes and chromatic structure.
+
+## filmgrain
+
+Applies photographic film grain to a TGA (or any stb-supported) image. The grain model is based on a highlight roll-off response curve so dark/mid areas get more visible grain, like real silver-halide film stock.
+
+### Building
+
+```bash
+cd tools/filmgrain
+mkdir -p build && cd build
+cmake .. && cmake --build .
+```
+
+### Usage
+
+```bash
+./filmgrain [options] input.tga [output.tga]
+```
+
+| Option       | Default         | Description                                |
+| ------------ | --------------- | ------------------------------------------ |
+| `-s <val>`   | `0.15`          | Grain strength (0.0–1.0)                   |
+| `-g <val>`   | `1.0`           | Grain size in pixels (>1 = coarser clumps) |
+| `-seed <n>`  | `42`            | RNG seed (deterministic for animation)     |
+| `-mono`      | _(off)_         | Monochromatic grain (default: per-channel) |
+
+If no output path is given, defaults to `input_grain.tga`.
+
+### Examples
+
+```bash
+# Subtle grain
+./filmgrain -s 0.10 ../../build/output.tga
+
+# Heavy, coarse, monochromatic grain (high-ISO look)
+./filmgrain -s 0.30 -g 2.0 -mono ../../build/output.tga output_grainy.tga
+
+# Consistent grain across animation frames (same seed per frame for temporal stability)
+./filmgrain -s 0.12 -seed 100 frame_0001.tga frame_0001_grain.tga
+```

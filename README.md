@@ -15,13 +15,15 @@ A physically-based Kerr black hole ray tracer that renders images of spinning bl
 - **Log tonemap** — configurable compression for cinematic look
 - **Anti-aliasing** — NxN stratified supersampling (up to 16spp)
 - **GPU acceleration** — optional CUDA backend for NVIDIA GPUs
+- **Compile-time precision** — switchable fp64 (reference quality) / fp32 (fast GPU) via `USE_FLOAT`
+- **LOD anti-aliasing** — procedural textures fade smoothly based on texel-to-pixel ratio, eliminating moiré and shimmer at all distances
 - **CPU parallelism** — OpenMP for multi-core rendering
 - **Animation** — time parameter for disk rotation with differential Keplerian orbits
 - **Equirectangular** — supports 360° × 180° panoramic renders for VR
 
-> **Note:** Post-processing (bloom, lens flares, colour grading) is handled
-> externally by [flaresim](flaresim/) and compositing tools, keeping the
-> renderer output clean for maximum flexibility.
+> **Note:** Post-processing (bloom, lens flares, film grain, colour grading) is handled
+> externally by [flaresim](flaresim/), [tools/filmgrain](tools/filmgrain/), and
+> compositing tools, keeping the renderer output clean for maximum flexibility.
 
 ## Requirements
 
@@ -52,7 +54,7 @@ sudo apt install cmake libopenexr-dev libomp-dev
 ```bash
 mkdir -p build && cd build
 cmake ..
-cmake --build .
+cmake --build . -j
 ```
 
 The binary `bhrt3` will be created in the `build/` directory.
@@ -62,15 +64,23 @@ The binary `bhrt3` will be created in the `build/` directory.
 | Option             | Default   | Description                                    |
 | ------------------ | --------- | ---------------------------------------------- |
 | `USE_GPU`          | `OFF`     | Enable CUDA GPU acceleration                   |
+| `USE_FLOAT`        | `OFF`     | Use fp32 instead of fp64 for all physics (~2× faster on GPU, 32× on consumer cards) |
 | `CMAKE_BUILD_TYPE` | `Release` | `Release` for optimised, `Debug` for debugging |
 
 ```bash
 # GPU build (requires CUDA toolkit)
 cmake .. -DUSE_GPU=ON
 
+# GPU + single-precision (fastest on consumer GPUs)
+cmake .. -DUSE_GPU=ON -DUSE_FLOAT=ON
+
 # Debug build
 cmake .. -DCMAKE_BUILD_TYPE=Debug
 ```
+
+> **Important:** CMake caches option values. When switching `USE_FLOAT` or
+> `USE_GPU` on/off, delete the build directory (or at least `CMakeCache.txt`)
+> and reconfigure from scratch to ensure the flags take effect.
 
 ## Usage
 
@@ -130,11 +140,12 @@ All parameters are set in a plain-text `scene.txt` file using `key = value` synt
 
 ### Ray Integration
 
-| Key             | Default | Description                             |
-| --------------- | ------- | --------------------------------------- |
-| `base_dt`       | `0.1`   | Base integration step size              |
-| `max_affine`    | `100.0` | Maximum affine parameter (ray lifetime) |
-| `escape_radius` | `50.0`  | Rays beyond this radius are escaped     |
+| Key             | Default | Description                                           |
+| --------------- | ------- | ----------------------------------------------------- |
+| `base_dt`       | `0.1`   | Base integration step size                            |
+| `max_affine`    | `100.0` | Maximum affine parameter (ray lifetime)               |
+| `escape_radius` | `50.0`  | Rays beyond this radius are considered escaped        |
+| `max_iter`      | `50000` | Hard iteration cap per ray (bounds photon-sphere cost) |
 
 ### Accretion Disk
 
@@ -187,7 +198,24 @@ These separate layers allow independent colour grading, bloom, lens flares, sky 
 python render_sequence.py -n 120 -dt 0.5
 ```
 
-This renders 120 frames, incrementing the `time` parameter by 0.5 each frame. Frames are saved to `build/frames/`.
+This renders 120 frames, incrementing the `time` parameter by 0.5 each frame. Frames are saved to `build/frames/`. Supports TGA, EXR, and HDR output formats.
+
+### Apply lens flares to all frames
+
+```bash
+python flare_sequence.py
+python flare_sequence.py --jobs 4 -- --flare_gain 5000 --bloom_strength 3.0
+```
+
+Reads numbered EXR frames from `build/frames/`, runs each through [flaresim](flaresim/) to add lens-flare layers, and writes results to `build/frames_flared/`. Extra `--key value` pairs after `--` are forwarded as flaresim CLI overrides.
+
+### Apply film grain
+
+```bash
+tools/filmgrain/build/filmgrain -s 0.12 build/output.tga output_grain.tga
+```
+
+See [tools/filmgrain](#filmgrain) below.
 
 ### Assemble into video
 
@@ -195,11 +223,34 @@ This renders 120 frames, incrementing the `time` parameter by 0.5 each frame. Fr
 ./make_video.sh -r 24 -o blackhole.mp4
 ```
 
-Uses ffmpeg to encode the frame sequence into an H.264 video.
+Uses ffmpeg to encode the frame sequence into an H.264 video. Auto-detects flared frames if present. Options:
+
+| Flag | Default          | Description                              |
+| ---- | ---------------- | ---------------------------------------- |
+| `-i` | _(auto-detect)_  | Input frames directory                   |
+| `-p` | `frame`          | Frame filename prefix                    |
+| `-o` | `blackhole.mp4`  | Output video filename                    |
+| `-r` | `24`             | Framerate (fps)                          |
+| `-c` | `18`             | H.264 CRF quality (0 = lossless, 51 = worst) |
+| `-f` | `tga`            | Input frame format (`tga`, `exr`, `hdr`) |
 
 ### Distributed rendering
 
 For rendering across multiple machines, see [slurm/README.md](slurm/README.md).
+
+## GPU Rendering
+
+The optional CUDA backend uses a persistent-thread work-stealing design:
+
+- Fixed thread pool (`SM_count × 2` blocks of 256 threads)
+- Global atomic work counter distributes pixels dynamically
+- Threads that finish cheap sky pixels immediately pick up new work
+- Eliminates the "tail-end" stall from uneven per-pixel cost
+- Live progress reporting via zero-copy mapped pinned memory
+
+Physics code in `physics.h` is shared between CPU and GPU via the `BH_FUNC` macro (`__host__ __device__` under nvcc, empty otherwise).
+
+When `USE_FLOAT=ON`, all physics computation uses `float` instead of `double`. On consumer NVIDIA GPUs (GeForce), this can be **32× faster** because fp64 throughput is heavily throttled. On datacenter GPUs (A100, H100) the speedup is ~2×. There is a slight loss of accuracy near the photon sphere.
 
 ## Post-Processing Pipeline
 
@@ -207,42 +258,103 @@ bhrt3 outputs clean, unprocessed linear HDR data. All post-processing is handled
 
 1. **bhrt3** → renders raw EXR with separate disk/sky layers
 2. **[flaresim](flaresim/)** → adds physically-based lens flares, bloom, and ghost reflections
-3. **Compositing** (Resolve, Nuke, etc.) → final colour grading, sky replacement, LUTs
+3. **[filmgrain](tools/filmgrain/)** → applies photographic film grain to TGA output
+4. **Compositing** (Resolve, Nuke, etc.) → final colour grading, sky replacement, LUTs
 
 This separation keeps each stage clean and allows non-destructive iteration on the look.
+
+## Tools
+
+Standalone utility programs in the [tools/](tools/) directory, each with their own CMakeLists.txt.
+
+### flaretest
+
+Generates a minimal test EXR file with a single extremely bright pixel — useful for validating flaresim's ghost tracing and bloom pipeline without a full bhrt3 render.
+
+```bash
+cd tools/flaretest && mkdir -p build && cd build
+cmake .. && cmake --build .
+./flaretest [output.exr]
+```
+
+### filmgrain
+
+Applies photographic film grain to a TGA image. Grain response is shaped like real silver-halide film: most visible in midtones, fading in deep shadows and blown highlights.
+
+```bash
+cd tools/filmgrain && mkdir -p build && cd build
+cmake .. && cmake --build .
+./filmgrain [options] input.tga [output.tga]
+```
+
+| Option     | Default | Description                                  |
+| ---------- | ------- | -------------------------------------------- |
+| `-s`       | `0.15`  | Grain strength (0.0–1.0)                     |
+| `-g`       | `1.0`   | Grain size in pixels (>1 = coarser clumps)   |
+| `-seed`    | `42`    | RNG seed (same seed = same grain pattern)    |
+| `-mono`    | _(off)_ | Monochromatic grain (default: per-channel)   |
+
+## Flaresim
+
+The [flaresim/](flaresim/) directory contains a physically-based lens flare simulator that reads EXR renders from bhrt3 and adds:
+
+- **Ghost reflections** — traced through a real lens prescription using Fresnel equations
+- **Bloom** — energy-conserving kernel convolution
+- **Chromatic aberration** — wavelength-dependent ghost positioning and intensity
+
+Lens prescriptions (`.lens` files) are in [flaresim/lenses/](flaresim/lenses/). Includes a Cooke triplet and double-Gauss design. See [flaresim/README.md](flaresim/README.md) for full documentation.
+
+## Slurm Cluster Rendering
+
+The [slurm/](slurm/) directory contains scripts for distributing frame renders across multiple machines connected via Tailscale, scheduled by Slurm. Each frame is an independent array task. See [slurm/README.md](slurm/README.md) for setup and usage.
+
+## Reference
+
+`kerr-image.c` is the original reference implementation by David A. Madore (2011, Public Domain) that inspired the geodesic integration approach used in bhrt3.
 
 ## Project Structure
 
 ```
 ├── CMakeLists.txt          # Main build configuration
 ├── scene.txt               # Scene description (key=value)
-├── render_sequence.py      # Animation frame renderer
-├── make_video.sh           # ffmpeg video assembler
-├── inc/                    # Header files
-│   ├── physics.h           # Kerr geodesics, disk physics, radiative transfer
+├── render_sequence.py      # Animation: render numbered frames
+├── flare_sequence.py       # Animation: apply flaresim to all frames
+├── make_video.sh           # Animation: assemble frames into video
+├── kerr-image.c            # Reference: Madore's original Kerr tracer
+├── hubble-skymap.jpg       # Default sky map
+├── inc/                    # Shared header files
+│   ├── physics.h           # Kerr geodesics, disk physics, radiative transfer, LOD
 │   ├── scene.h             # Scene config struct
 │   ├── sky.h               # Sky map sampling
-│   ├── types.h             # Shared types (dvec3, etc.)
-│   ├── vec_math.h          # CPU/GPU vector/matrix math
+│   ├── types.h             # Shared type aliases
+│   ├── vec_math.h          # CPU/GPU vector/matrix math, bh_real precision typedef
 │   └── common.h            # Common utilities
 ├── src/                    # C++ source files
-│   ├── main.cpp            # Render loop, output writers
+│   ├── main.cpp            # CPU render loop, tone mapping, output writers
 │   ├── scene.cpp           # Scene file parser
 │   ├── sky.cpp             # Sky image loader
 │   └── stb_impl.cpp        # stb library implementations
 ├── gpu/                    # CUDA GPU backend
-│   ├── gpu_render.cu       # GPU render kernel
-│   └── gpu_render.h        # GPU interface
+│   ├── gpu_render.cu       # GPU render kernel (persistent-thread work-stealing)
+│   └── gpu_render.h        # GPU interface and scene param struct
 ├── lib/                    # Third-party libraries (header-only)
 │   ├── stb_image.h         # Image loading
 │   └── stb_image_write.h   # Image writing (TGA, HDR, JPEG)
 ├── flaresim/               # Lens flare simulator (separate build)
-│   ├── src/                # Flare sim source code
+│   ├── src/                # Flare sim source (ghost tracing, bloom, Fresnel)
 │   ├── lenses/             # Lens prescriptions (.lens files)
-│   └── README.md           # Flaresim documentation
-├── tools/                  # Utility programs
-│   └── flaretest/          # EXR test pattern generator
+│   └── flaresim.conf       # Default flaresim settings
+├── tools/                  # Standalone utility programs
+│   ├── flaretest/          # EXR test pattern generator
+│   └── filmgrain/          # Film grain applicator
 └── slurm/                  # HPC cluster scripts (Slurm + Tailscale)
+    ├── submit_render.sh    # Submit array job
+    ├── render_frame.sbatch # Per-frame Slurm job script
+    ├── collect_frames.sh   # Rsync frames from compute nodes
+    ├── setup_node.sh       # Bootstrap a new compute node
+    ├── add_node.sh         # Register node with Slurm controller
+    ├── cluster_status.sh   # Check node/job status
+    └── slurm.conf.template # Slurm config template
 ```
 
 ## License
