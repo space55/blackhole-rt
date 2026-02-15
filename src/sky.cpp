@@ -9,12 +9,12 @@
 // Sample the sky image for a given world-space direction
 // ---------------------------------------------------------------------------
 dvec3 sample_sky(const sky_image_s &sky, const dvec3 &direction,
-                 const dmat3 &sky_rot, double offset_u, double offset_v)
+                 const dmat3 &sky_rot, bh_real offset_u, bh_real offset_v)
 {
     dvec3 dir_normalized = (sky_rot * direction).normalized();
 
-    double u = 0.5 - (atan2(dir_normalized.z, dir_normalized.x) / (2.0 * M_PI));
-    double v = 0.5 - (asin(dclamp(dir_normalized.y, -1.0, 1.0)) / M_PI);
+    bh_real u = 0.5 - (atan2(dir_normalized.z, dir_normalized.x) / (2.0 * M_PI));
+    bh_real v = 0.5 - (asin(dclamp(dir_normalized.y, -1.0, 1.0)) / M_PI);
 
     u += offset_u;
     v += offset_v;
@@ -24,9 +24,9 @@ dvec3 sample_sky(const sky_image_s &sky, const dvec3 &direction,
     int ix = std::clamp(static_cast<int>(u * sky.width), 0, sky.width - 1);
     int iy = std::clamp(static_cast<int>(v * sky.height), 0, sky.height - 1);
 
-    return dvec3(static_cast<double>(sky.r(ix, iy)) / 255.0,
-                 static_cast<double>(sky.g(ix, iy)) / 255.0,
-                 static_cast<double>(sky.b(ix, iy)) / 255.0);
+    return dvec3(static_cast<bh_real>(sky.r(ix, iy)) / 255.0,
+                 static_cast<bh_real>(sky.g(ix, iy)) / 255.0,
+                 static_cast<bh_real>(sky.b(ix, iy)) / 255.0);
 }
 
 sky_image_s *load_sky_image(const char *filename)

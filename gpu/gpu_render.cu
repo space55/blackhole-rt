@@ -72,17 +72,17 @@ __global__ __launch_bounds__(256, 2) void render_kernel(GPUPixelResult *results,
 
     const int width = c_params.width;
     const int aa_grid = c_params.aa_grid;
-    const double inv_aa = 1.0 / aa_grid;
-    const double inv_spp = 1.0 / (double)(aa_grid * aa_grid);
+    const bh_real inv_aa = 1.0 / aa_grid;
+    const bh_real inv_spp = 1.0 / (bh_real)(aa_grid * aa_grid);
 
-    const double r_plus = pp.r_plus;
-    const double base_dt = c_params.base_dt;
-    const double max_affine = c_params.max_affine;
-    const double escape_r2 = c_params.escape_r2;
-    const double width_d = (double)c_params.width;
-    const double height_d = (double)c_params.height;
-    const double fov_x = c_params.fov_x;
-    const double fov_y = c_params.fov_y;
+    const bh_real r_plus = pp.r_plus;
+    const bh_real base_dt = c_params.base_dt;
+    const bh_real max_affine = c_params.max_affine;
+    const bh_real escape_r2 = c_params.escape_r2;
+    const bh_real width_d = (bh_real)c_params.width;
+    const bh_real height_d = (bh_real)c_params.height;
+    const bh_real fov_x = c_params.fov_x;
+    const bh_real fov_y = c_params.fov_y;
 
     // Hard iteration cap to bound worst-case rays near the photon sphere
     const int max_iter = 50000;
@@ -98,15 +98,15 @@ __global__ __launch_bounds__(256, 2) void render_kernel(GPUPixelResult *results,
         const int py = idx / width;
 
         dvec3 pixel_disk(0, 0, 0);
-        double pixel_sky_weight = 0;
+        bh_real pixel_sky_weight = 0;
         dvec3 pixel_exit_dir(0, 0, 0);
 
         for (int sy = 0; sy < aa_grid; sy++)
         {
             for (int sx = 0; sx < aa_grid; sx++)
             {
-                const double sub_x = (px + (sx + 0.5) * inv_aa) / width_d;
-                const double sub_y = (py + (sy + 0.5) * inv_aa) / height_d;
+                const bh_real sub_x = (px + (sx + 0.5) * inv_aa) / width_d;
+                const bh_real sub_y = (py + (sy + 0.5) * inv_aa) / height_d;
 
                 // Initialize ray using shared physics
                 dvec3 pos, vel;
@@ -114,42 +114,42 @@ __global__ __launch_bounds__(256, 2) void render_kernel(GPUPixelResult *results,
                          sub_x, sub_y, fov_x, fov_y);
 
                 dvec3 acc_color(0, 0, 0);
-                double acc_opacity = 0;
-                double cached_r = ks_radius(pos, pp.bh_spin);
+                bh_real acc_opacity = 0;
+                bh_real cached_r = ks_radius(pos, pp.bh_spin);
                 bool hit_bh = false;
-                double affine = 0;
+                bh_real affine = 0;
                 int iter = 0;
 
                 while (affine < max_affine && iter < max_iter)
                 {
                     ++iter;
-                    const double delta = fmax(cached_r - r_plus, 0.01);
-                    double step_dt = base_dt * dclamp(delta * delta, 0.001, 1.0);
+                    const bh_real delta = fmax(cached_r - r_plus, 0.01);
+                    bh_real step_dt = base_dt * dclamp(delta * delta, 0.001, 1.0);
 
                     // Step size reduction near disk
-                    const double disk_inner_guard = pp.disk_flat_mode ? pp.disk_inner_r * 0.4 : pp.disk_inner_r * 0.8;
-                    const double disk_outer_guard = pp.disk_flat_mode ? pp.disk_outer_r * 1.6 : pp.disk_outer_r * 1.2;
+                    const bh_real disk_inner_guard = pp.disk_flat_mode ? pp.disk_inner_r * 0.4 : pp.disk_inner_r * 0.8;
+                    const bh_real disk_outer_guard = pp.disk_flat_mode ? pp.disk_outer_r * 1.6 : pp.disk_outer_r * 1.2;
                     if (cached_r >= disk_inner_guard && cached_r <= disk_outer_guard)
                     {
-                        const double h = disk_half_thickness(cached_r, pp);
-                        const double y_dist = fabs(pos.y);
+                        const bh_real h = disk_half_thickness(cached_r, pp);
+                        const bh_real y_dist = fabs(pos.y);
                         if (y_dist < 5.0 * h)
                         {
                             step_dt = fmin(step_dt, fmax(0.15 * h, 0.001));
 
                             // Grazing-angle refinement
-                            const double v_horiz_sq = vel.x * vel.x + vel.z * vel.z;
-                            const double v_vert_sq = vel.y * vel.y;
+                            const bh_real v_horiz_sq = vel.x * vel.x + vel.z * vel.z;
+                            const bh_real v_vert_sq = vel.y * vel.y;
                             if (v_horiz_sq > 4.0 * v_vert_sq)
                             {
-                                const double v_horiz = sqrt(v_horiz_sq);
-                                const double texture_scale = pp.disk_flat_mode ? 0.15 : 0.3;
+                                const bh_real v_horiz = sqrt(v_horiz_sq);
+                                const bh_real texture_scale = pp.disk_flat_mode ? 0.15 : 0.3;
                                 step_dt = fmin(step_dt, texture_scale / v_horiz);
                             }
                         }
                     }
 
-                    const double prev_y = pos.y;
+                    const bh_real prev_y = pos.y;
 
                     if (!advance_ray(pos, vel, cached_r, step_dt, pp))
                     {
@@ -163,8 +163,8 @@ __global__ __launch_bounds__(256, 2) void render_kernel(GPUPixelResult *results,
                         if (cached_r >= (pp.disk_inner_r * 0.4) &&
                             cached_r <= (pp.disk_outer_r * 1.6))
                         {
-                            const double t_cross = fabs(prev_y) /
-                                                   fmax(fabs(prev_y) + fabs(pos.y), 1e-12);
+                            const bh_real t_cross = fabs(prev_y) /
+                                                    fmax(fabs(prev_y) + fabs(pos.y), 1e-12);
                             dvec3 mid_pos = (1.0 - t_cross) * (pos - step_dt * vel) +
                                             t_cross * pos;
                             mid_pos.y = 0.0;
@@ -189,8 +189,8 @@ __global__ __launch_bounds__(256, 2) void render_kernel(GPUPixelResult *results,
                     // Cheap vertical check: skip disk sampling entirely when
                     // far above/below the disk plane (avoids expensive inner
                     // computation for the vast majority of ray steps)
-                    const double samp_inner_guard = pp.disk_flat_mode ? pp.disk_inner_r * 0.4 : pp.disk_inner_r * 0.8;
-                    const double samp_outer_guard = pp.disk_flat_mode ? pp.disk_outer_r * 1.6 : pp.disk_outer_r * 1.3;
+                    const bh_real samp_inner_guard = pp.disk_flat_mode ? pp.disk_inner_r * 0.4 : pp.disk_inner_r * 0.8;
+                    const bh_real samp_outer_guard = pp.disk_flat_mode ? pp.disk_outer_r * 1.6 : pp.disk_outer_r * 1.3;
                     if (fabs(pos.y) < pp.disk_thickness * 15.0 &&
                         cached_r >= samp_inner_guard &&
                         cached_r <= samp_outer_guard)
@@ -213,7 +213,7 @@ __global__ __launch_bounds__(256, 2) void render_kernel(GPUPixelResult *results,
                 pixel_disk += acc_color;
                 if (!hit_bh && bh_isfinite(acc_opacity))
                 {
-                    double transmittance = 1.0 - acc_opacity;
+                    bh_real transmittance = 1.0 - acc_opacity;
                     pixel_sky_weight += transmittance;
                     pixel_exit_dir += transmittance * vel;
                 }
@@ -229,10 +229,9 @@ __global__ __launch_bounds__(256, 2) void render_kernel(GPUPixelResult *results,
         // any component is non-finite, zero the ENTIRE direction + weight so
         // the CPU sky mapper never sees a partially-corrupted direction
         // pointing to a random sky location.
-        auto is_finite_d = [](double v) -> bool
+        auto is_finite_d = [](bh_real v) -> bool
         {
-            unsigned long long b = __double_as_longlong(v);
-            return ((b >> 52) & 0x7FFull) != 0x7FFull;
+            return bh_isfinite(v);
         };
 
         if (!is_finite_d(pixel_sky_weight) || !is_finite_d(pixel_exit_dir.x) ||
@@ -275,7 +274,7 @@ bool gpu_render(const GPUSceneParams &params, GPUPixelResult *host_results)
     printf("GPU: %s (compute %d.%d, %d SMs, %.0f MHz)\n",
            prop.name, prop.major, prop.minor,
            prop.multiProcessorCount, prop.clockRate / 1000.0);
-    printf("GPU memory: %.0f MB total, double-precision throughput: %s\n",
+    printf("GPU memory: %.0f MB total, bh_real-precision throughput: %s\n",
            prop.totalGlobalMem / (1024.0 * 1024.0),
            (prop.major >= 8) ? "good (Ampere+)" : (prop.major >= 7) ? "decent (Volta+)"
                                                                     : "limited");
@@ -331,11 +330,11 @@ bool gpu_render(const GPUSceneParams &params, GPUPixelResult *host_results)
     while (cudaEventQuery(stop) == cudaErrorNotReady)
     {
         int done = *h_progress; // mapped memory: no cudaMemcpy needed
-        double pct = 100.0 * done / (double)num_pixels;
+        bh_real pct = 100.0 * done / (bh_real)num_pixels;
         auto now = std::chrono::steady_clock::now();
-        double elapsed = std::chrono::duration<double>(now - poll_start).count();
-        double rate = (elapsed > 0.01) ? done / elapsed : 0;
-        double eta = (rate > 0 && done < num_pixels) ? (num_pixels - done) / rate : 0;
+        bh_real elapsed = std::chrono::duration<bh_real>(now - poll_start).count();
+        bh_real rate = (elapsed > 0.01) ? done / elapsed : 0;
+        bh_real eta = (rate > 0 && done < num_pixels) ? (num_pixels - done) / rate : 0;
         printf("\rGPU progress: %6.2f%% (%d / %d px)  %.1f Kpx/s  ETA %.1fs   ",
                pct, done, num_pixels, rate / 1e3, eta);
         fflush(stdout);

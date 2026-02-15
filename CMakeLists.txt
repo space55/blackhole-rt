@@ -10,6 +10,11 @@ endif()
 # GPU acceleration via CUDA (off by default)
 option(USE_GPU "Build with CUDA GPU acceleration" OFF)
 
+# Single-precision mode: use float instead of double for all ray integration
+# and physics.  ~2x faster on GPU (32x on consumer cards), slightly less
+# accurate near the photon sphere.  Compare with the fp64 default.
+option(USE_FLOAT "Use float (fp32) instead of double (fp64) for physics" OFF)
+
 if(USE_GPU)
     project(bhrt3 LANGUAGES CXX CUDA)
     set(CMAKE_CUDA_STANDARD 17)
@@ -68,6 +73,13 @@ if(USE_GPU)
     target_compile_definitions(${PROJECT_NAME} PRIVATE USE_GPU)
     # Fast math for CUDA device code; -lineinfo for profiling
     target_compile_options(${PROJECT_NAME} PRIVATE $<$<COMPILE_LANGUAGE:CUDA>:--use_fast_math -lineinfo>)
+endif()
+
+if(USE_FLOAT)
+    target_compile_definitions(${PROJECT_NAME} PRIVATE BH_USE_FLOAT)
+    message(STATUS "Precision: FLOAT (fp32)")
+else()
+    message(STATUS "Precision: DOUBLE (fp64)")
 endif()
 
 if(OpenMP_CXX_FOUND)

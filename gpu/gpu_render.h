@@ -19,14 +19,14 @@ struct GPUSceneParams
     PhysicsParams physics;
 
     // Camera (rotation pre-computed on host)
-    double cam_pos[3];
-    double cam_right[3]; // rotation matrix column 0
-    double cam_up[3];    // rotation matrix column 1
-    double cam_fwd[3];   // rotation matrix column 2
-    double fov_x, fov_y;
+    bh_real cam_pos[3];
+    bh_real cam_right[3]; // rotation matrix column 0
+    bh_real cam_up[3];    // rotation matrix column 1
+    bh_real cam_fwd[3];   // rotation matrix column 2
+    bh_real fov_x, fov_y;
 
     // Ray integration
-    double base_dt, max_affine, escape_r2;
+    bh_real base_dt, max_affine, escape_r2;
 
     // Rendering
     int aa_grid;

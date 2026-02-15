@@ -39,6 +39,9 @@ int main(int argc, char *argv[])
     }
     print_scene_config(cfg);
 
+    // --- Verify bh_real type ------------------------------------------------
+    printf("bh_real size = %zu bytes\n", sizeof(bh_real));
+
     // --- Sky image -------------------------------------------------------
     sky_image_s *image = load_sky_image(cfg.sky_image.c_str());
     if (!image)
@@ -65,11 +68,11 @@ int main(int argc, char *argv[])
     // --- Derived constants from config -----------------------------------
     const int out_width = cfg.output_width;
     const int out_height = cfg.output_height;
-    const double base_dt = cfg.base_dt;
-    const double max_affine = cfg.max_affine;
-    const double escape_r2 = cfg.escape_radius * cfg.escape_radius;
-    const double fov_x = cfg.fov_x;
-    const double fov_y = cfg.fov_y;
+    const bh_real base_dt = cfg.base_dt;
+    const bh_real max_affine = cfg.max_affine;
+    const bh_real escape_r2 = cfg.escape_radius * cfg.escape_radius;
+    const bh_real fov_x = cfg.fov_x;
+    const bh_real fov_y = cfg.fov_y;
     const dvec3 camera_pos(cfg.camera_x, cfg.camera_y, cfg.camera_z);
 
     // --- LOD: set camera info for procedural texture anti-aliasing -------
@@ -97,18 +100,18 @@ int main(int argc, char *argv[])
     const size_t num_pixels = static_cast<size_t>(out_width) * static_cast<size_t>(out_height);
     std::vector<dvec3> hdr_disk(num_pixels);
     std::vector<dvec3> hdr_sky(num_pixels);
-    std::vector<double> hdr_alpha(num_pixels, 0.0); // disk opacity (0 = transparent, 1 = opaque/BH)
+    std::vector<bh_real> hdr_alpha(num_pixels, 0.0); // disk opacity (0 = transparent, 1 = opaque/BH)
     std::vector<BH_COLOR_CHANNEL_TYPE> pixels(num_pixels * 3);
 
     const int total_pixels = out_width * out_height;
     std::atomic<int> pixels_done(0);
 
-    const double r_plus = pp.r_plus;
+    const bh_real r_plus = pp.r_plus;
 
     // --- Tone mapping ----------------------------------------------------
-    const double disk_tonemap_compression = cfg.tonemap_compression;
-    const double tonemap_c = pow(10.0, disk_tonemap_compression * 2.0) - 1.0;
-    const double tonemap_norm = 1.0 / log(1.0 + tonemap_c);
+    const bh_real disk_tonemap_compression = cfg.tonemap_compression;
+    const bh_real tonemap_c = pow(10.0, disk_tonemap_compression * 2.0) - 1.0;
+    const bh_real tonemap_norm = 1.0 / log(1.0 + tonemap_c);
     auto tonemap_disk = [&](const dvec3 &hdr) -> dvec3
     {
         if (tonemap_c < 1e-6)
@@ -126,8 +129,8 @@ int main(int argc, char *argv[])
     // --- Anti-aliasing: stratified NxN supersampling ---------------------
     const int aa_grid = std::max(cfg.aa_samples, 1);
     const int aa_spp = aa_grid * aa_grid;
-    const double inv_spp = 1.0 / aa_spp;
-    const double inv_aa = 1.0 / aa_grid;
+    const bh_real inv_spp = 1.0 / aa_spp;
+    const bh_real inv_aa = 1.0 / aa_grid;
     printf("Anti-aliasing: %dx%d = %d samples/pixel\n", aa_grid, aa_grid, aa_spp);
 
     auto render_start = std::chrono::steady_clock::now();
@@ -156,7 +159,7 @@ int main(int argc, char *argv[])
             hdr_disk[i] = dvec3(gpu_results[i].disk_r,
                                 gpu_results[i].disk_g,
                                 gpu_results[i].disk_b);
-            hdr_alpha[i] = 1.0 - (double)gpu_results[i].sky_weight;
+            hdr_alpha[i] = 1.0 - (bh_real)gpu_results[i].sky_weight;
 
             if (gpu_results[i].sky_weight > 1e-6f)
             {
@@ -168,7 +171,7 @@ int main(int argc, char *argv[])
                     dvec3 sky_color = sample_sky(*image, exit_dir, sky_rot,
                                                  cfg.sky_offset_u, cfg.sky_offset_v);
                     hdr_sky[i] = sky_color *
-                                 (double)gpu_results[i].sky_weight;
+                                 (bh_real)gpu_results[i].sky_weight;
                 }
             }
         }
@@ -185,15 +188,15 @@ int main(int argc, char *argv[])
             const int idx = y * out_width + x;
             dvec3 pixel_color;
             dvec3 pixel_sky;
-            double pixel_alpha = 0.0;
+            bh_real pixel_alpha = 0.0;
 
             for (int sy = 0; sy < aa_grid; ++sy)
             {
                 for (int sx = 0; sx < aa_grid; ++sx)
                 {
                     // Sub-pixel offset: stratified sample at center of each grid cell
-                    const double sub_x = (x + (sx + 0.5) * inv_aa) / out_width;
-                    const double sub_y = (y + (sy + 0.5) * inv_aa) / out_height;
+                    const bh_real sub_x = (x + (sx + 0.5) * inv_aa) / out_width;
+                    const bh_real sub_y = (y + (sy + 0.5) * inv_aa) / out_height;
 
                     bool hit_black_hole = false;
 
@@ -201,28 +204,28 @@ int main(int argc, char *argv[])
                     init_ray(pos, vel, camera_pos, cam_right, cam_up, cam_fwd,
                              sub_x, sub_y, fov_x, fov_y);
 
-                    double cached_ks_r = ks_radius(pos, pp.bh_spin);
+                    bh_real cached_ks_r = ks_radius(pos, pp.bh_spin);
                     dvec3 acc_color;
-                    double acc_opacity = 0.0;
+                    bh_real acc_opacity = 0.0;
 
-                    double affine = 0.0;
+                    bh_real affine = 0.0;
                     while (affine < max_affine)
                     {
-                        const double r_ks = cached_ks_r;
-                        const double delta = std::max(r_ks - r_plus, 0.01);
-                        double step_dt = base_dt * std::clamp(delta * delta, 0.0001, 1.0);
+                        const bh_real r_ks = cached_ks_r;
+                        const bh_real delta = std::max(r_ks - r_plus, bh_real(0.01));
+                        bh_real step_dt = base_dt * std::clamp(delta * delta, bh_real(0.0001), bh_real(1.0));
 
                         // Reduce step size when near the disk
-                        const double disk_inner_guard = pp.disk_flat_mode ? pp.disk_inner_r * 0.4 : pp.disk_inner_r * 0.8;
-                        const double disk_outer_guard = pp.disk_flat_mode ? pp.disk_outer_r * 1.6 : pp.disk_outer_r * 1.2;
+                        const bh_real disk_inner_guard = pp.disk_flat_mode ? pp.disk_inner_r * 0.4 : pp.disk_inner_r * 0.8;
+                        const bh_real disk_outer_guard = pp.disk_flat_mode ? pp.disk_outer_r * 1.6 : pp.disk_outer_r * 1.2;
                         if (r_ks >= disk_inner_guard && r_ks <= disk_outer_guard)
                         {
-                            const double h = disk_half_thickness(r_ks, pp);
-                            const double y_dist = fabs(pos.y);
+                            const bh_real h = disk_half_thickness(r_ks, pp);
+                            const bh_real y_dist = fabs(pos.y);
                             if (y_dist < 5.0 * h)
                             {
                                 // Base refinement: fraction of disk thickness
-                                step_dt = std::min(step_dt, std::max(0.15 * h, 0.001));
+                                step_dt = std::min(step_dt, std::max(bh_real(0.15) * h, bh_real(0.001)));
 
                                 // Grazing-angle refinement: when the ray travels
                                 // nearly parallel to the disk plane, the horizontal
@@ -230,14 +233,14 @@ int main(int argc, char *argv[])
                                 // Limit step so we don't skip more than ~0.3 M of
                                 // horizontal distance per step (resolves procedural
                                 // texture at all camera angles).
-                                const double v_horiz_sq = vel.x * vel.x + vel.z * vel.z;
-                                const double v_vert_sq = vel.y * vel.y;
+                                const bh_real v_horiz_sq = vel.x * vel.x + vel.z * vel.z;
+                                const bh_real v_vert_sq = vel.y * vel.y;
                                 if (v_horiz_sq > 4.0 * v_vert_sq)
                                 {
                                     // Ray is nearly horizontal — cap step by
                                     // horizontal texture scale (not disk thickness)
-                                    const double v_horiz = sqrt(v_horiz_sq);
-                                    const double texture_scale = pp.disk_flat_mode ? 0.15 : 0.3;
+                                    const bh_real v_horiz = sqrt(v_horiz_sq);
+                                    const bh_real texture_scale = pp.disk_flat_mode ? 0.15 : 0.3;
                                     step_dt = std::min(step_dt, texture_scale / v_horiz);
                                 }
                             }
@@ -248,7 +251,7 @@ int main(int argc, char *argv[])
                         // over entirely.  Detect the crossing and insert an
                         // extra sample at the midplane so adjacent pixels don't
                         // get different hit/miss results (= ladder artifact).
-                        const double prev_y = pos.y;
+                        const bh_real prev_y = pos.y;
 
                         if (!advance_ray(pos, vel, cached_ks_r, step_dt, pp))
                         {
@@ -260,13 +263,13 @@ int main(int argc, char *argv[])
                         // range, insert an interpolated midplane sample.
                         if (pp.disk_flat_mode && prev_y * pos.y < 0.0)
                         {
-                            const double cross_r = cached_ks_r;
+                            const bh_real cross_r = cached_ks_r;
                             if (cross_r >= (pp.disk_inner_r * 0.4) &&
                                 cross_r <= (pp.disk_outer_r * 1.6))
                             {
                                 // Linearly interpolate to the y=0 crossing
-                                const double t_cross = fabs(prev_y) /
-                                                       fmax(fabs(prev_y) + fabs(pos.y), 1e-12);
+                                const bh_real t_cross = fabs(prev_y) /
+                                                        fmax(fabs(prev_y) + fabs(pos.y), 1e-12);
                                 dvec3 mid_pos = (1.0 - t_cross) * (pos - step_dt * vel) +
                                                 t_cross * pos;
                                 mid_pos.y = 0.0; // exactly on midplane
@@ -278,9 +281,9 @@ int main(int argc, char *argv[])
 
                         // Sample disk emission along the ray — cheap guard
                         // skips the full function when clearly outside the disk
-                        const double prev_opacity = acc_opacity;
-                        const double samp_inner_guard = pp.disk_flat_mode ? pp.disk_inner_r * 0.4 : pp.disk_inner_r * 0.8;
-                        const double samp_outer_guard = pp.disk_flat_mode ? pp.disk_outer_r * 1.6 : pp.disk_outer_r * 1.3;
+                        const bh_real prev_opacity = acc_opacity;
+                        const bh_real samp_inner_guard = pp.disk_flat_mode ? pp.disk_inner_r * 0.4 : pp.disk_inner_r * 0.8;
+                        const bh_real samp_outer_guard = pp.disk_flat_mode ? pp.disk_outer_r * 1.6 : pp.disk_outer_r * 1.3;
                         if (fabs(pos.y) < pp.disk_thickness * 15.0 &&
                             cached_ks_r >= samp_inner_guard &&
                             cached_ks_r <= samp_outer_guard)
@@ -315,7 +318,7 @@ int main(int argc, char *argv[])
                     {
                         dvec3 sky_color = sample_sky(*image, vel, sky_rot,
                                                      cfg.sky_offset_u, cfg.sky_offset_v);
-                        double transmittance = 1.0 - acc_opacity;
+                        bh_real transmittance = 1.0 - acc_opacity;
                         pixel_color += acc_color;
                         pixel_sky += transmittance * sky_color;
                         pixel_alpha += acc_opacity;
