@@ -1,0 +1,2 @@
+demo/flare_output.exr filter=lfs diff=lfs merge=lfs -text
+demo/output.exr filter=lfs diff=lfs merge=lfs -text
