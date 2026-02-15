@@ -300,7 +300,7 @@ int main(int argc, char *argv[])
                         {
                             break;
                         }
-                        if (acc_opacity > 0.99)
+                        if (acc_opacity > 0.95)
                         {
                             break;
                         }

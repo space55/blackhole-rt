@@ -211,7 +211,7 @@ __global__ __launch_bounds__(256, 2) void render_kernel(GPUPixelResult *results,
                     }
                     if (pos.squaredNorm() > escape_r2)
                         break;
-                    if (acc_opacity > 0.99)
+                    if (acc_opacity > 0.95)
                         break;
                 }
 
