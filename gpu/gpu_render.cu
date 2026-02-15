@@ -123,7 +123,7 @@ __global__ __launch_bounds__(256, 2) void render_kernel(GPUPixelResult *results,
                 while (affine < max_affine && iter < max_iter)
                 {
                     ++iter;
-                    const bh_real delta = fmax(cached_r - r_plus, 0.01);
+                    const bh_real delta = bh_fmax(cached_r - r_plus, 0.01);
                     bh_real step_dt = base_dt * dclamp(delta * delta, 0.001, 1.0);
 
                     // Step size reduction near disk
@@ -135,7 +135,7 @@ __global__ __launch_bounds__(256, 2) void render_kernel(GPUPixelResult *results,
                         const bh_real y_dist = fabs(pos.y);
                         if (y_dist < 5.0 * h)
                         {
-                            step_dt = fmin(step_dt, fmax(0.15 * h, 0.001));
+                            step_dt = bh_fmin(step_dt, bh_fmax(0.15 * h, 0.001));
 
                             // Grazing-angle refinement
                             const bh_real v_horiz_sq = vel.x * vel.x + vel.z * vel.z;
@@ -144,7 +144,7 @@ __global__ __launch_bounds__(256, 2) void render_kernel(GPUPixelResult *results,
                             {
                                 const bh_real v_horiz = sqrt(v_horiz_sq);
                                 const bh_real texture_scale = pp.disk_flat_mode ? 0.15 : 0.3;
-                                step_dt = fmin(step_dt, texture_scale / v_horiz);
+                                step_dt = bh_fmin(step_dt, texture_scale / v_horiz);
                             }
                         }
                     }
@@ -164,7 +164,7 @@ __global__ __launch_bounds__(256, 2) void render_kernel(GPUPixelResult *results,
                             cached_r <= (pp.disk_outer_r * 1.6))
                         {
                             const bh_real t_cross = fabs(prev_y) /
-                                                    fmax(fabs(prev_y) + fabs(pos.y), 1e-12);
+                                                    bh_fmax(fabs(prev_y) + fabs(pos.y), 1e-12);
                             dvec3 mid_pos = (1.0 - t_cross) * (pos - step_dt * vel) +
                                             t_cross * pos;
                             mid_pos.y = 0.0;

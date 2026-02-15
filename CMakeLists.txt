@@ -71,7 +71,9 @@ target_include_directories(${PROJECT_NAME} PRIVATE "gpu/")
 
 if(USE_GPU)
     target_compile_definitions(${PROJECT_NAME} PRIVATE USE_GPU)
-    # Fast math for CUDA device code; -lineinfo for profiling
+    # Fast math for CUDA device code; -lineinfo for profiling;
+    # --expt-relaxed-constexpr allows constexpr host functions (<cmath>) in
+    # device code — safety net for any residual mixed-type math calls.
     target_compile_options(${PROJECT_NAME} PRIVATE $<$<COMPILE_LANGUAGE:CUDA>:--use_fast_math -lineinfo>)
 endif()
 

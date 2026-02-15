@@ -58,7 +58,7 @@ struct PhysicsParams
 
 BH_FUNC inline bh_real compute_event_horizon(bh_real M, bh_real a)
 {
-    return M + sqrt(fmax(M * M - a * a, 0.0));
+    return M + sqrt(bh_fmax(M * M - a * a, 0.0));
 }
 
 BH_FUNC inline bh_real compute_isco(bh_real M, bh_real a)
@@ -81,7 +81,7 @@ BH_FUNC inline bh_real ks_radius(const dvec3 &pos, bh_real spin)
     const bh_real term = rho2 - a2;
     const bh_real disc = term * term + 4.0 * a2 * pos.y * pos.y;
     const bh_real r2 = 0.5 * (term + sqrt(disc));
-    return sqrt(fmax(r2, 1e-12));
+    return sqrt(bh_fmax(r2, 1e-12));
 }
 
 // ============================================================================
@@ -108,7 +108,7 @@ BH_FUNC inline bh_real compute_texel_size(const dvec3 &pos, const PhysicsParams 
     const bh_real texel_base = cam_dist * pp.pixel_angle;
     // Foreshortening: disk normal = (0,1,0), view dir ≈ (pos-cam)/|pos-cam|
     const bh_real sin_incidence = fabs(dy) / cam_dist;
-    return texel_base / fmax(sin_incidence, 0.002); // cap at 500× stretch
+    return texel_base / bh_fmax(sin_incidence, 0.002); // cap at 500× stretch
 }
 
 // Frequency fade for sin(k * log_r) terms: wavelength = 2π * r / k
@@ -128,11 +128,11 @@ BH_FUNC inline bh_real lod_fade_logr(bh_real k, bh_real r_ks, bh_real texel_size
 }
 
 // Frequency fade for streak(k * log_r, sharpness) terms.
-// pow(sin², sharpness) creates features sqrt(sharpness) times narrower than
+// bh_pow(sin², sharpness) creates features sqrt(sharpness) times narrower than
 // the base wavelength.  Effective frequency ≈ k * min(sqrt(sharpness), 8).
 BH_FUNC inline bh_real lod_fade_streak(bh_real k, bh_real sharpness, bh_real r_ks, bh_real texel_size)
 {
-    const bh_real eff_k = k * fmin(sqrt(sharpness), 8.0);
+    const bh_real eff_k = k * bh_fmin(sqrt(sharpness), 8.0);
     return lod_fade_logr(eff_k, r_ks, texel_size);
 }
 
@@ -147,11 +147,11 @@ BH_FUNC inline bh_real lod_arc_window(bh_real phi, bh_real log_r, bh_real seed,
     const bh_real w1 = sin(1.0 * phi + 2.71 * log_r + seed);
     const bh_real w2 = sin(2.0 * phi - 4.33 * log_r + seed * 1.7 + 1.1);
     const bh_real w3 = sin(3.0 * phi + 7.19 * log_r + seed * 0.6 + 3.4);
-    const bh_real window = pow(fmax(w1 * w1 * w2 * w2 * w3 * w3, 1e-12), brevity);
+    const bh_real window = bh_pow(bh_fmax(w1 * w1 * w2 * w2 * w3 * w3, 1e-12), brevity);
 
     // The highest radial freq component is 7.19 in log_r space.
     // brevity sharpens all three sin² terms jointly.
-    const bh_real eff_k = 7.19 * fmin(sqrt(fmax(brevity, 1.0)), 4.0);
+    const bh_real eff_k = 7.19 * bh_fmin(sqrt(bh_fmax(brevity, 1.0)), 4.0);
     const bh_real fade = lod_fade_logr(eff_k, r_ks, texel_size);
     // fade=1 → well-resolved → return window; fade=0 → aliased → return 1.0
     return 1.0 - fade * (1.0 - window);
@@ -190,7 +190,7 @@ BH_FUNC inline dvec3 geodesic_accel(const dvec3 &pos, const dvec3 &vel,
     const bh_real rho2 = px * px + py * py + pz * pz;
     const bh_real term = rho2 - a2;
     const bh_real r2 = 0.5 * (term + sqrt(term * term + 4.0 * a2 * py * py));
-    const bh_real r = sqrt(fmax(r2, 1e-12));
+    const bh_real r = sqrt(bh_fmax(r2, 1e-12));
     const bh_real inv_r = 1.0 / r;
     const bh_real inv_r2 = inv_r * inv_r;
 
@@ -219,7 +219,7 @@ BH_FUNC inline dvec3 geodesic_accel(const dvec3 &pos, const dvec3 &vel,
     const bh_real c_u0 = v_sq + twoH * lv * lv;
 
     const bh_real disc_u0 = b_u0 * b_u0 - 4.0 * g00 * c_u0;
-    const bh_real sqrt_disc = sqrt(fmax(disc_u0, 0.0));
+    const bh_real sqrt_disc = sqrt(bh_fmax(disc_u0, 0.0));
     const bh_real inv_2g00 = 0.5 / g00;
     const bh_real u0a = (-b_u0 + sqrt_disc) * inv_2g00;
     const bh_real u0b = (-b_u0 - sqrt_disc) * inv_2g00;
@@ -328,7 +328,7 @@ BH_FUNC inline bh_real disk_half_thickness(bh_real r_ks, const PhysicsParams &pp
 BH_FUNC inline bh_real disk_warped_half_thickness(const dvec3 &pos, bh_real r_ks,
                                                  const PhysicsParams &pp)
 {
-    const bh_real h0 = disk_half_thickness(fmin(r_ks, pp.disk_outer_r), pp);
+    const bh_real h0 = disk_half_thickness(bh_fmin(r_ks, pp.disk_outer_r), pp);
     bh_real turb = pp.disk_turbulence;
     if (pp.disk_flat_mode)
         turb *= 0.65; // allow substantial geometric warping even when flat
@@ -336,7 +336,7 @@ BH_FUNC inline bh_real disk_warped_half_thickness(const dvec3 &pos, bh_real r_ks
         return h0;
 
     const bh_real phi = atan2(pos.z, pos.x);
-    const bh_real log_r = log(fmax(r_ks, 1e-6));
+    const bh_real log_r = log(bh_fmax(r_ks, 1e-6));
 
     const bh_real omega = 1.0 / (r_ks * sqrt(r_ks));
     const bh_real tp = pp.disk_time * omega;
@@ -354,7 +354,7 @@ BH_FUNC inline bh_real disk_warped_half_thickness(const dvec3 &pos, bh_real r_ks
     auto dip = [](bh_real phase, bh_real sharpness) -> bh_real
     {
         bh_real s = sin(phase);
-        return pow(s * s, sharpness);
+        return bh_pow(s * s, sharpness);
     };
     warp -= 0.70 * dip(1.0 * (phi + tp) - 4.0 * log_r + 2.5, 40.0);
     warp -= 0.40 * dip(1.0 * (phi + tp) - 7.0 * log_r + 0.3, 50.0);
@@ -370,7 +370,7 @@ BH_FUNC inline bh_real disk_warped_half_thickness(const dvec3 &pos, bh_real r_ks
     }
 
     const bh_real factor = 1.0 + turb * warp;
-    return h0 * fmax(factor, 0.05);
+    return h0 * bh_fmax(factor, 0.05);
 }
 
 // ============================================================================
@@ -493,7 +493,7 @@ BH_FUNC inline bh_real disk_stipple_factor(const dvec3 &pos, bh_real r_ks,
         particle += 0.15 * spec * spec * spec; // cubed: very sparse bright knots
     }
 
-    particle = fmin(particle, 1.0);
+    particle = bh_fmin(particle, 1.0);
 
     // Factor: voids between particles are dim, particles are bright
     const bh_real void_level = 0.08; // material between specks (very dim)
@@ -534,7 +534,7 @@ BH_FUNC inline bh_real disk_clump_factor(const dvec3 &pos, bh_real r_ks,
     auto streak = [](bh_real phase, bh_real sharpness) -> bh_real
     {
         const bh_real s = sin(phase);
-        return pow(s * s, sharpness);
+        return bh_pow(s * s, sharpness);
     };
 
     // Arc-length window: product of sin² at incommensurate radial frequencies
@@ -611,9 +611,9 @@ BH_FUNC inline bh_real disk_clump_factor(const dvec3 &pos, bh_real r_ks,
                cos(10.0 * phi - 65.0 * log_r + 3.7);
 
         // Caustic-like bright concentric filaments
-        mod += fmin(lod_fade_streak(12.0, 50.0, r_ks, texel), lod_fade_linear(15.0, texel)) * 0.50 * streak(2.0 * (phi + t_phase) - 12.0 * log_r + 2.0, 50.0) *
+        mod += bh_fmin(lod_fade_streak(12.0, 50.0, r_ks, texel), lod_fade_linear(15.0, texel)) * 0.50 * streak(2.0 * (phi + t_phase) - 12.0 * log_r + 2.0, 50.0) *
                streak(15.0 * r_ks + 3.3, 30.0) * arc_window(phi, log_r, 2.0, 1.0);
-        mod += fmin(lod_fade_streak(18.0, 40.0, r_ks, texel), lod_fade_linear(21.0, texel)) * 0.35 * streak(2.0 * (phi + t_phase) - 18.0 * log_r + 4.5, 40.0) *
+        mod += bh_fmin(lod_fade_streak(18.0, 40.0, r_ks, texel), lod_fade_linear(21.0, texel)) * 0.35 * streak(2.0 * (phi + t_phase) - 18.0 * log_r + 4.5, 40.0) *
                streak(21.0 * r_ks + 1.1, 25.0) * arc_window(phi, log_r, 4.5, 1.2);
 
         // Turbulent "froth" — radial-dominant fine texture
@@ -668,11 +668,11 @@ BH_FUNC inline bh_real disk_clump_factor(const dvec3 &pos, bh_real r_ks,
     // Flat mode: wider dynamic range for deeper contrast
     if (pp.disk_flat_mode)
     {
-        const bh_real factor = 0.20 + 0.80 * fmax(mod, 0.0);
+        const bh_real factor = 0.20 + 0.80 * bh_fmax(mod, 0.0);
         return dclamp(factor, 0.01, 5.0);
     }
 
-    const bh_real factor = 0.35 + 0.65 * fmax(mod, 0.0);
+    const bh_real factor = 0.35 + 0.65 * bh_fmax(mod, 0.0);
     return dclamp(factor, 0.02, 3.0);
 }
 
@@ -693,7 +693,7 @@ BH_FUNC inline bh_real disk_density(const dvec3 &pos, bh_real r_ks,
         return 0.0;
 
     const bh_real height = pos.y;
-    const bh_real radial = pow(pp.disk_isco / r_ks, 1.5);
+    const bh_real radial = bh_pow(pp.disk_isco / r_ks, 1.5);
     const bh_real vertical = exp(-0.5 * (height * height) / (warped_h * warped_h));
 
     bh_real outer_fade = 1.0;
@@ -751,7 +751,7 @@ BH_FUNC inline bh_real disk_temperature(bh_real r_ks, const PhysicsParams &pp)
     // Novikov-Thorne profile always references the physical ISCO
     const bh_real x_ratio = r_ks / isco;
     const bh_real factor = (1.0 / (x_ratio * x_ratio * x_ratio)) *
-                          fmax(1.0 - sqrt(1.0 / x_ratio), 0.0);
+                          bh_fmax(1.0 - sqrt(1.0 / x_ratio), 0.0);
     const bh_real peak_x = 49.0 / 36.0;
     const bh_real peak_val = (1.0 / (peak_x * peak_x * peak_x)) *
                             (1.0 - sqrt(1.0 / peak_x));
@@ -765,7 +765,7 @@ BH_FUNC inline bh_real disk_temperature(bh_real r_ks, const PhysicsParams &pp)
         outer_fade = exp(-(d * d) / (2.0 * fw * fw));
     }
 
-    bh_real T_base = fmax(pow(fmax(T4 * outer_fade, 0.0), 0.25), 0.0);
+    bh_real T_base = bh_fmax(bh_pow(bh_fmax(T4 * outer_fade, 0.0), 0.25), 0.0);
     return T_base;
 }
 
@@ -786,7 +786,7 @@ BH_FUNC inline bh_real disk_temperature_perturbation(const dvec3 &pos, bh_real r
         return 1.0;
 
     const bh_real phi = atan2(pos.z, pos.x);
-    const bh_real log_r = log(fmax(r_ks, 1e-6));
+    const bh_real log_r = log(bh_fmax(r_ks, 1e-6));
     const bh_real r_norm = dclamp((r_ks - tex_inner) / (tex_outer - tex_inner), 0.0, 1.0);
 
     const bh_real omega = 1.0 / (r_ks * sqrt(r_ks));
@@ -798,7 +798,7 @@ BH_FUNC inline bh_real disk_temperature_perturbation(const dvec3 &pos, bh_real r
     auto streak = [](bh_real phase, bh_real sharpness) -> bh_real
     {
         const bh_real s = sin(phase);
-        return pow(s * s, sharpness);
+        return bh_pow(s * s, sharpness);
     };
 
     auto arc_window = [r_ks, texel](bh_real phi, bh_real log_r, bh_real seed, bh_real brevity) -> bh_real
@@ -880,7 +880,7 @@ BH_FUNC inline dvec3 temperature_to_rgb(bh_real T)
     }
     else
     {
-        bh_real t = fmin((T - 1.0) / 1.0, 1.0);
+        bh_real t = bh_fmin((T - 1.0) / 1.0, 1.0);
         r = 1.0 - 0.15 * t;
         g = 1.0 - 0.05 * t;
         b = 1.0;
@@ -916,7 +916,7 @@ BH_FUNC inline dvec3 disk_emissivity(const dvec3 &pos, bh_real r_ks,
         const bh_real inner_r = pp.disk_inner_r;
         const bh_real outer_r = pp.disk_outer_r;
         const bh_real phi = atan2(pos.z, pos.x);
-        const bh_real log_r = log(fmax(r_ks, 1e-6));
+        const bh_real log_r = log(bh_fmax(r_ks, 1e-6));
         const bh_real r_norm = dclamp((r_ks - inner_r) / (outer_r - inner_r), 0.0, 1.0);
 
         const bh_real hue = 0.6 * sin(1.0 * phi - 4.0 * log_r + 0.5) +
@@ -955,7 +955,7 @@ BH_FUNC inline dvec3 disk_emissivity(const dvec3 &pos, bh_real r_ks,
             auto streak_fn = [](bh_real phase, bh_real sharpness) -> bh_real
             {
                 const bh_real s = sin(phase);
-                return pow(s * s, sharpness);
+                return bh_pow(s * s, sharpness);
             };
 
             // LOD: fade high-frequency color terms
@@ -1062,7 +1062,7 @@ BH_FUNC inline dvec4 disk_gas_four_velocity(const dvec3 &pos, bh_real r_ks,
 
         // Radial infall velocity: approximate free-fall from ISCO
         // v_r ~ -sqrt(2M * (1/r - 1/r_isco)) (Newtonian approximation)
-        const bh_real v_r_mag = sqrt(fmax(2.0 * M * (1.0 / r_ks - 1.0 / inner_r), 0.0));
+        const bh_real v_r_mag = sqrt(bh_fmax(2.0 * M * (1.0 / r_ks - 1.0 / inner_r), 0.0));
 
         // Spatial velocity in Cartesian coords (inward radial + orbital)
         const bh_real vx = -cos_phi * v_r_mag - sin_phi * Omega_plunge * r_cyl;
@@ -1077,7 +1077,7 @@ BH_FUNC inline dvec4 disk_gas_four_velocity(const dvec3 &pos, bh_real r_ks,
         const bh_real v_sq = vx * vx + vy * vy + vz * vz;
         const bh_real c = v_sq + twoH * lv * lv + 1.0;
         const bh_real disc = b * b - 4.0 * g00 * c;
-        const bh_real sqrt_disc = sqrt(fmax(disc, 0.0));
+        const bh_real sqrt_disc = sqrt(bh_fmax(disc, 0.0));
         const bh_real inv_2g00 = 0.5 / g00;
         const bh_real u0a = (-b + sqrt_disc) * inv_2g00;
         const bh_real u0b = (-b - sqrt_disc) * inv_2g00;
@@ -1103,7 +1103,7 @@ BH_FUNC inline dvec4 disk_gas_four_velocity(const dvec3 &pos, bh_real r_ks,
     const bh_real c = v_sq + twoH * lv * lv + 1.0; // +1 for timelike
 
     const bh_real disc = b * b - 4.0 * g00 * c;
-    const bh_real sqrt_disc = sqrt(fmax(disc, 0.0));
+    const bh_real sqrt_disc = sqrt(bh_fmax(disc, 0.0));
     const bh_real inv_2g00 = 0.5 / g00;
     const bh_real u0a = (-b + sqrt_disc) * inv_2g00;
     const bh_real u0b = (-b - sqrt_disc) * inv_2g00;
@@ -1247,7 +1247,7 @@ BH_FUNC inline void sample_disk_volume(const dvec3 &pos, const dvec3 &vel, bh_re
     const bh_real c_u0 = v_sq + twoH * lv_phot * lv_phot;
 
     const bh_real disc_u0 = b_u0 * b_u0 - 4.0 * g00 * c_u0;
-    const bh_real sqrt_disc = sqrt(fmax(disc_u0, 0.0));
+    const bh_real sqrt_disc = sqrt(bh_fmax(disc_u0, 0.0));
     const bh_real inv_2g00 = 0.5 / g00;
     const bh_real u0a = (-b_u0 + sqrt_disc) * inv_2g00;
     const bh_real u0b = (-b_u0 - sqrt_disc) * inv_2g00;
@@ -1276,11 +1276,11 @@ BH_FUNC inline void sample_disk_volume(const dvec3 &pos, const dvec3 &vel, bh_re
     dvec3 j_obs = g3 * j;
     if (g_clamped > 1.0)
     {
-        j_obs.z *= fmin(g_clamped, 2.0);
+        j_obs.z *= bh_fmin(g_clamped, 2.0);
     }
     else
     {
-        j_obs.x *= fmin(1.0 / g_clamped, 2.0);
+        j_obs.x *= bh_fmin(1.0 / g_clamped, 2.0);
         j_obs.z *= g_clamped;
     }
 
@@ -1288,11 +1288,11 @@ BH_FUNC inline void sample_disk_volume(const dvec3 &pos, const dvec3 &vel, bh_re
     const bh_real transmittance = 1.0 - acc_opacity;
     const bh_real dtau = alpha * ds;
     const bh_real absorption_factor = 1.0 - exp(-dtau);
-    const bh_real inv_alpha = 1.0 / fmax(alpha, 1e-12);
+    const bh_real inv_alpha = 1.0 / bh_fmax(alpha, 1e-12);
 
     acc_color += transmittance * absorption_factor * inv_alpha * j_obs;
     acc_opacity += transmittance * absorption_factor;
-    acc_opacity = fmin(acc_opacity, 1.0);
+    acc_opacity = bh_fmin(acc_opacity, 1.0);
 }
 
 // ============================================================================

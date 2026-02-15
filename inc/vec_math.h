@@ -43,6 +43,19 @@ BH_FUNC inline bh_real dclamp(bh_real x, bh_real lo, bh_real hi)
     return fmin(fmax(x, lo), hi);
 }
 
+// --------------------------------------------------------------------------
+// Type-safe wrappers for two-arg math functions.
+//
+// When bh_real = float, bare double literals (0.01, 1e-12 …) cause mixed
+// float/double overload resolution that picks the <cmath> constexpr
+// __host__-only version — illegal in CUDA __device__ code.  These wrappers
+// force both arguments to bh_real at the call site, so the correct
+// same-type CUDA intrinsic is selected.
+// --------------------------------------------------------------------------
+BH_FUNC inline bh_real bh_fmax(bh_real a, bh_real b) { return fmax(a, b); }
+BH_FUNC inline bh_real bh_fmin(bh_real a, bh_real b) { return fmin(a, b); }
+BH_FUNC inline bh_real bh_pow(bh_real a, bh_real b) { return pow(a, b); }
+
 BH_FUNC inline bool bh_isfinite(bh_real x)
 {
 #ifdef __CUDA_ARCH__
@@ -74,11 +87,33 @@ struct dvec3
     BH_FUNC dvec3 operator+(const dvec3 &b) const { return {x + b.x, y + b.y, z + b.z}; }
     BH_FUNC dvec3 operator-(const dvec3 &b) const { return {x - b.x, y - b.y, z - b.z}; }
     BH_FUNC dvec3 operator*(bh_real s) const { return {x * s, y * s, z * s}; }
-    BH_FUNC dvec3 operator/(bh_real s) const { bh_real inv = bh_real(1) / s; return {x * inv, y * inv, z * inv}; }
+    BH_FUNC dvec3 operator/(bh_real s) const
+    {
+        bh_real inv = bh_real(1) / s;
+        return {x * inv, y * inv, z * inv};
+    }
 
-    BH_FUNC dvec3 &operator+=(const dvec3 &b) { x += b.x; y += b.y; z += b.z; return *this; }
-    BH_FUNC dvec3 &operator-=(const dvec3 &b) { x -= b.x; y -= b.y; z -= b.z; return *this; }
-    BH_FUNC dvec3 &operator*=(bh_real s) { x *= s; y *= s; z *= s; return *this; }
+    BH_FUNC dvec3 &operator+=(const dvec3 &b)
+    {
+        x += b.x;
+        y += b.y;
+        z += b.z;
+        return *this;
+    }
+    BH_FUNC dvec3 &operator-=(const dvec3 &b)
+    {
+        x -= b.x;
+        y -= b.y;
+        z -= b.z;
+        return *this;
+    }
+    BH_FUNC dvec3 &operator*=(bh_real s)
+    {
+        x *= s;
+        y *= s;
+        z *= s;
+        return *this;
+    }
 
     BH_FUNC bh_real dot(const dvec3 &b) const { return x * b.x + y * b.y + z * b.z; }
     BH_FUNC dvec3 cross(const dvec3 &b) const
@@ -120,13 +155,19 @@ struct dmat3
 
     BH_FUNC dmat3()
     {
-        m[0] = 1; m[1] = 0; m[2] = 0;
-        m[3] = 0; m[4] = 1; m[5] = 0;
-        m[6] = 0; m[7] = 0; m[8] = 1;
+        m[0] = 1;
+        m[1] = 0;
+        m[2] = 0;
+        m[3] = 0;
+        m[4] = 1;
+        m[5] = 0;
+        m[6] = 0;
+        m[7] = 0;
+        m[8] = 1;
     }
 
-    BH_FUNC bh_real  operator()(int row, int col) const { return m[col * 3 + row]; }
-    BH_FUNC bh_real &operator()(int row, int col)       { return m[col * 3 + row]; }
+    BH_FUNC bh_real operator()(int row, int col) const { return m[col * 3 + row]; }
+    BH_FUNC bh_real &operator()(int row, int col) { return m[col * 3 + row]; }
 
     BH_FUNC dvec3 col(int c) const { return {m[c * 3], m[c * 3 + 1], m[c * 3 + 2]}; }
 
@@ -155,9 +196,15 @@ struct dmat3
     {
         dmat3 r;
         bh_real c = cos(angle), s = sin(angle);
-        r.m[0] = 1; r.m[3] = 0; r.m[6] = 0;
-        r.m[1] = 0; r.m[4] = c; r.m[7] = -s;
-        r.m[2] = 0; r.m[5] = s; r.m[8] = c;
+        r.m[0] = 1;
+        r.m[3] = 0;
+        r.m[6] = 0;
+        r.m[1] = 0;
+        r.m[4] = c;
+        r.m[7] = -s;
+        r.m[2] = 0;
+        r.m[5] = s;
+        r.m[8] = c;
         return r;
     }
 
@@ -165,9 +212,15 @@ struct dmat3
     {
         dmat3 r;
         bh_real c = cos(angle), s = sin(angle);
-        r.m[0] = c;  r.m[3] = 0; r.m[6] = s;
-        r.m[1] = 0;  r.m[4] = 1; r.m[7] = 0;
-        r.m[2] = -s; r.m[5] = 0; r.m[8] = c;
+        r.m[0] = c;
+        r.m[3] = 0;
+        r.m[6] = s;
+        r.m[1] = 0;
+        r.m[4] = 1;
+        r.m[7] = 0;
+        r.m[2] = -s;
+        r.m[5] = 0;
+        r.m[8] = c;
         return r;
     }
 
@@ -175,9 +228,15 @@ struct dmat3
     {
         dmat3 r;
         bh_real c = cos(angle), s = sin(angle);
-        r.m[0] = c; r.m[3] = -s; r.m[6] = 0;
-        r.m[1] = s; r.m[4] = c;  r.m[7] = 0;
-        r.m[2] = 0; r.m[5] = 0;  r.m[8] = 1;
+        r.m[0] = c;
+        r.m[3] = -s;
+        r.m[6] = 0;
+        r.m[1] = s;
+        r.m[4] = c;
+        r.m[7] = 0;
+        r.m[2] = 0;
+        r.m[5] = 0;
+        r.m[8] = 1;
         return r;
     }
 };
