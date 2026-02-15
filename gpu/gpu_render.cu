@@ -85,7 +85,7 @@ __global__ __launch_bounds__(256, 2) void render_kernel(GPUPixelResult *results,
     const bh_real fov_y = c_params.fov_y;
 
     // Hard iteration cap to bound worst-case rays near the photon sphere
-    const int max_iter = 50000;
+    const int max_iter = c_params.max_iter;
 
     // Persistent work loop — each thread grabs one pixel at a time
     while (true)

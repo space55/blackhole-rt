@@ -43,6 +43,7 @@ struct scene_config_s
     double base_dt = 0.1;
     double max_affine = 100.0;
     double escape_radius = 50.0;
+    int max_iter = 50000; // hard iteration cap per ray (bounds photon-sphere cost)
 
     // Accretion disk geometry
     double disk_inner_r = -1.0; // inner edge in M; -1 = auto (ISCO)

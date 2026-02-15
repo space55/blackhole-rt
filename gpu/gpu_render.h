@@ -27,6 +27,7 @@ struct GPUSceneParams
 
     // Ray integration
     bh_real base_dt, max_affine, escape_r2;
+    int max_iter;
 
     // Rendering
     int aa_grid;
@@ -63,23 +64,30 @@ inline void fill_gpu_params(GPUSceneParams &p,
     p.cam_pos[1] = cfg.camera_y;
     p.cam_pos[2] = cfg.camera_z;
     dvec3 right = cam_rot.col(0);
-    dvec3 up    = cam_rot.col(1);
-    dvec3 fwd   = cam_rot.col(2);
-    p.cam_right[0] = right.x; p.cam_right[1] = right.y; p.cam_right[2] = right.z;
-    p.cam_up[0]    = up.x;    p.cam_up[1]    = up.y;    p.cam_up[2]    = up.z;
-    p.cam_fwd[0]   = fwd.x;   p.cam_fwd[1]   = fwd.y;   p.cam_fwd[2]   = fwd.z;
+    dvec3 up = cam_rot.col(1);
+    dvec3 fwd = cam_rot.col(2);
+    p.cam_right[0] = right.x;
+    p.cam_right[1] = right.y;
+    p.cam_right[2] = right.z;
+    p.cam_up[0] = up.x;
+    p.cam_up[1] = up.y;
+    p.cam_up[2] = up.z;
+    p.cam_fwd[0] = fwd.x;
+    p.cam_fwd[1] = fwd.y;
+    p.cam_fwd[2] = fwd.z;
     p.fov_x = cfg.fov_x;
     p.fov_y = cfg.fov_y;
 
     // Ray integration
-    p.base_dt    = cfg.base_dt;
+    p.base_dt = cfg.base_dt;
     p.max_affine = cfg.max_affine;
-    p.escape_r2  = cfg.escape_radius * cfg.escape_radius;
+    p.escape_r2 = cfg.escape_radius * cfg.escape_radius;
+    p.max_iter = cfg.max_iter;
 
     // Rendering
     p.aa_grid = std::max(cfg.aa_samples, 1);
-    p.width   = cfg.output_width;
-    p.height  = cfg.output_height;
+    p.width = cfg.output_width;
+    p.height = cfg.output_height;
 }
 
 #endif

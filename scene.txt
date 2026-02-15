@@ -45,6 +45,7 @@ bh_spin         = 0.999         # spin  parameter a  (|a| < M)
 base_dt         = 0.1           # base integration step
 max_affine      = 200.0         # max affine parameter (ray lifetime)
 escape_radius   = 75.0          # rays beyond this radius are considered escaped
+max_iter        = 50000         # hard iteration cap per ray (bounds photon-sphere cost)
 
 # --- Accretion disk geometry ------------------------------------------------
 disk_inner_r    = -1            # inner edge in M; -1 = auto (ISCO for current spin)
