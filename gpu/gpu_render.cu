@@ -58,55 +58,31 @@ __global__ __launch_bounds__(256, 2) void render_kernel(GPUPixelResult *results,
                                                         int *work_counter,
                                                         int total_pixels)
 {
-    // ====================================================================
-    // Shared-memory scene parameters — one copy per block (~328 bytes)
-    //
-    // PhysicsParams alone has 19 doubles + 1 int; combined with camera
-    // vectors and render scalars the old register-copy approach consumed
-    // ~80 of the 128-register budget (launch_bounds 256,2).  That left
-    // <50 registers for Kerr metric temporaries and procedural-texture
-    // maths — causing the compiler to spill to local memory (DRAM-backed,
-    // ~200+ cycle reads).
-    //
-    // Keeping the immutable parameters in shared memory (one copy shared
-    // by all 256 threads in the block) frees those registers.  Shared-
-    // memory reads are ~20 cycles — 10× cheaper than local-memory
-    // spills — and the compute-heavy loop body has enough ILP to hide
-    // the latency.
-    // ====================================================================
-    __shared__ GPUSceneParams s_params;
-    if (threadIdx.x == 0)
-        s_params = c_params;
-    __syncthreads();
+    // Local copy of physics params — constant memory is cached and
+    // broadcasts to all warp threads for free; copying into a local
+    // struct lets the compiler keep hot fields (bh_spin, bh_mass) in
+    // registers for the tight geodesic_accel inner loop.
+    const PhysicsParams pp = c_params.physics;
 
-    // Reference to shared memory — physics.h functions that take
-    // `const PhysicsParams &` read directly from shared memory, letting
-    // the compiler register-cache only the fields it actually needs in
-    // hot paths (bh_spin, bh_mass in geodesic_accel; disk bounds in the
-    // step-size logic) while cold fields stay in shared memory.
-    const PhysicsParams &pp = s_params.physics;
+    // Camera basis vectors (from constant memory)
+    const dvec3 cam_right(c_params.cam_right[0], c_params.cam_right[1], c_params.cam_right[2]);
+    const dvec3 cam_up(c_params.cam_up[0], c_params.cam_up[1], c_params.cam_up[2]);
+    const dvec3 cam_fwd(c_params.cam_fwd[0], c_params.cam_fwd[1], c_params.cam_fwd[2]);
+    const dvec3 cam_pos(c_params.cam_pos[0], c_params.cam_pos[1], c_params.cam_pos[2]);
 
-    // Camera basis vectors (constructed from shared memory; live only
-    // during init_ray calls, compiler can reclaim the registers after)
-    const dvec3 cam_right(s_params.cam_right[0], s_params.cam_right[1], s_params.cam_right[2]);
-    const dvec3 cam_up(s_params.cam_up[0], s_params.cam_up[1], s_params.cam_up[2]);
-    const dvec3 cam_fwd(s_params.cam_fwd[0], s_params.cam_fwd[1], s_params.cam_fwd[2]);
-    const dvec3 cam_pos(s_params.cam_pos[0], s_params.cam_pos[1], s_params.cam_pos[2]);
-
-    const int width = s_params.width;
-    const int aa_grid = s_params.aa_grid;
+    const int width = c_params.width;
+    const int aa_grid = c_params.aa_grid;
     const double inv_aa = 1.0 / aa_grid;
     const double inv_spp = 1.0 / (double)(aa_grid * aa_grid);
 
-    // Hot inner-loop constants — kept in registers (read every step)
     const double r_plus = pp.r_plus;
-    const double base_dt = s_params.base_dt;
-    const double max_affine = s_params.max_affine;
-    const double escape_r2 = s_params.escape_r2;
-    const double width_d = (double)s_params.width;
-    const double height_d = (double)s_params.height;
-    const double fov_x = s_params.fov_x;
-    const double fov_y = s_params.fov_y;
+    const double base_dt = c_params.base_dt;
+    const double max_affine = c_params.max_affine;
+    const double escape_r2 = c_params.escape_r2;
+    const double width_d = (double)c_params.width;
+    const double height_d = (double)c_params.height;
+    const double fov_x = c_params.fov_x;
+    const double fov_y = c_params.fov_y;
 
     // Hard iteration cap to bound worst-case rays near the photon sphere
     const int max_iter = 50000;
