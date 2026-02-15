@@ -41,7 +41,7 @@ This produces an EXR with ghost reflections from a single point source — ideal
 
 ## filmgrain
 
-Applies photographic film grain to a TGA (or any stb-supported) image. The grain model is based on a highlight roll-off response curve so dark/mid areas get more visible grain, like real silver-halide film stock.
+Applies photographic silver-halide film grain to a TGA (or any stb-supported) image. The grain is primarily luminance noise (crystal density variation) with a subtle, independently-generated chroma offset modelling the separate emulsion layers of colour negative stock. Grain is spatially clustered and blurred to mimic real grain clumps at typical 35mm scan resolution. An exposure-dependent response curve shapes visibility: minimal in deep shadows (unexposed silver), peaks in mid-tones (~0.35), gentle rolloff in highlights.
 
 ### Building
 
@@ -57,24 +57,27 @@ cmake .. && cmake --build .
 ./filmgrain [options] input.tga [output.tga]
 ```
 
-| Option      | Default | Description                                |
-| ----------- | ------- | ------------------------------------------ |
-| `-s <val>`  | `0.15`  | Grain strength (0.0–1.0)                   |
-| `-g <val>`  | `1.0`   | Grain size in pixels (>1 = coarser clumps) |
-| `-seed <n>` | `42`    | RNG seed (deterministic for animation)     |
-| `-mono`     | _(off)_ | Monochromatic grain (default: per-channel) |
+| Option        | Default | Description                                          |
+| ------------- | ------- | ---------------------------------------------------- |
+| `-s <val>`    | `0.06`  | Grain strength (0.0–1.0)                             |
+| `-g <val>`    | `1.8`   | Grain clump size (>1 = coarser, mimics 35mm scan)    |
+| `-chroma <f>` | `0.12`  | Chroma noise as fraction of luma strength (0 = mono) |
+| `-seed <n>`   | `42`    | RNG seed (deterministic for animation)               |
 
 If no output path is given, defaults to `input_grain.tga`.
 
 ### Examples
 
 ```bash
-# Subtle grain
-./filmgrain -s 0.10 ../../build/output.tga
+# Subtle, film-like grain (default settings)
+./filmgrain ../../build/output.tga
 
-# Heavy, coarse, monochromatic grain (high-ISO look)
-./filmgrain -s 0.30 -g 2.0 -mono ../../build/output.tga output_grainy.tga
+# Stronger grain with no chroma noise (pure luminance, like B&W stock)
+./filmgrain -s 0.12 -chroma 0 ../../build/output.tga output_grainy.tga
+
+# Heavy, coarse grain (pushed high-ISO look)
+./filmgrain -s 0.20 -g 3.0 ../../build/output.tga output_grainy.tga
 
 # Consistent grain across animation frames (same seed per frame for temporal stability)
-./filmgrain -s 0.12 -seed 100 frame_0001.tga frame_0001_grain.tga
+./filmgrain -s 0.06 -seed 100 frame_0001.tga frame_0001_grain.tga
 ```

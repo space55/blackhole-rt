@@ -2,7 +2,7 @@
 
 A physically-based Kerr black hole ray tracer that renders images of spinning black holes with accretion disks. Uses full Kerr-Schild geodesic integration, volumetric radiative transfer, Novikov-Thorne temperature profiles, and relativistic beaming/redshift.
 
-![Black hole render](build/output.tga)
+![Black hole render](demo/final.png)
 
 ## Features
 
@@ -279,7 +279,7 @@ cmake .. && cmake --build .
 
 ### filmgrain
 
-Applies photographic film grain to a TGA image. Grain response is shaped like real silver-halide film: most visible in midtones, fading in deep shadows and blown highlights.
+Applies photographic silver-halide film grain to a TGA image. The grain is primarily luminance noise (like real film crystal density variation) with a subtle, separately-generated chroma offset modelling the independent emulsion layers of colour negative stock. Grain is spatially clustered (not pixel-level white noise), shaped by an exposure response curve: minimal in deep shadows, peaks in mid-tones, gentle rolloff in highlights.
 
 ```bash
 cd tools/filmgrain && mkdir -p build && cd build
@@ -287,12 +287,12 @@ cmake .. && cmake --build .
 ./filmgrain [options] input.tga [output.tga]
 ```
 
-| Option  | Default | Description                                |
-| ------- | ------- | ------------------------------------------ |
-| `-s`    | `0.15`  | Grain strength (0.0–1.0)                   |
-| `-g`    | `1.0`   | Grain size in pixels (>1 = coarser clumps) |
-| `-seed` | `42`    | RNG seed (same seed = same grain pattern)  |
-| `-mono` | _(off)_ | Monochromatic grain (default: per-channel) |
+| Option    | Default | Description                                          |
+| --------- | ------- | ---------------------------------------------------- |
+| `-s`      | `0.06`  | Grain strength (0.0–1.0)                             |
+| `-g`      | `1.8`   | Grain clump size (>1 = coarser, mimics 35mm scan)    |
+| `-chroma` | `0.12`  | Chroma noise as fraction of luma strength (0 = mono) |
+| `-seed`   | `42`    | RNG seed (same seed = same grain pattern)            |
 
 ## Flaresim
 
