@@ -53,14 +53,14 @@ disk_inner_r    = -1            # inner edge in M; -1 = auto (ISCO for current s
                                 #   Set manually to e.g. 3.0 to pull the disk closer
 disk_outer_r    = 20.0          # outer edge in M
 disk_thickness  = 0.5           # half-thickness scale height
-disk_density    = 20.0          # base density ρ₀
-disk_opacity    = 1.0           # absorption per unit density κ₀
+disk_density    = 40.0          # base density ρ₀
+disk_opacity    = 2.0           # absorption per unit density κ₀
 
 # --- Accretion disk appearance ----------------------------------------------
-disk_emission_boost   = 10.0    # brightness multiplier (does not affect opacity)
+disk_emission_boost   = 20.0    # brightness multiplier (does not affect opacity)
 disk_color_variation  = 1.0     # 0 = physically accurate, 1 = full cinematic colour
 disk_turbulence       = 1.0     # 0 = smooth uniform disk, 1 = torn-apart debris ring
-disk_stipple          = 0.7     # 0 = smooth, 1 = fully particulate (specs & clumps)
+disk_stipple          = 1.0     # 0 = smooth, 1 = fully particulate (specs & clumps)
 
 # --- Disk flat mode ---------------------------------------------------------
 # Toggle for a thin, highly textured, opaque disk appearance.

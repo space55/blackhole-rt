@@ -65,7 +65,7 @@ BH_FUNC inline bh_real compute_isco(bh_real M, bh_real a)
 {
     const bh_real astar = a / M;
     const bh_real Z1 = 1.0 + cbrt(1.0 - astar * astar) *
-                                (cbrt(1.0 + astar) + cbrt(1.0 - astar));
+                                 (cbrt(1.0 + astar) + cbrt(1.0 - astar));
     const bh_real Z2 = sqrt(3.0 * astar * astar + Z1 * Z1);
     return M * (3.0 + Z2 - sqrt((3.0 - Z1) * (3.0 + Z1 + 2.0 * Z2)));
 }
@@ -142,7 +142,7 @@ BH_FUNC inline bh_real lod_fade_streak(bh_real k, bh_real sharpness, bh_real r_k
 // becomes visible as a warped checkerboard.  Fade toward 1.0 (full rings,
 // no fragmentation) when the window's own spatial frequency aliases.
 BH_FUNC inline bh_real lod_arc_window(bh_real phi, bh_real log_r, bh_real seed,
-                                     bh_real brevity, bh_real r_ks, bh_real texel_size)
+                                      bh_real brevity, bh_real r_ks, bh_real texel_size)
 {
     const bh_real w1 = sin(1.0 * phi + 2.71 * log_r + seed);
     const bh_real w2 = sin(2.0 * phi - 4.33 * log_r + seed * 1.7 + 1.1);
@@ -326,7 +326,7 @@ BH_FUNC inline bh_real disk_half_thickness(bh_real r_ks, const PhysicsParams &pp
 
 // Turbulence-warped half-thickness (azimuthal lumps, gaps, warps)
 BH_FUNC inline bh_real disk_warped_half_thickness(const dvec3 &pos, bh_real r_ks,
-                                                 const PhysicsParams &pp)
+                                                  const PhysicsParams &pp)
 {
     const bh_real h0 = disk_half_thickness(bh_fmin(r_ks, pp.disk_outer_r), pp);
     bh_real turb = pp.disk_turbulence;
@@ -418,12 +418,50 @@ BH_FUNC inline bh_real bh_value_noise(bh_real x, bh_real y, bh_real z)
     return xy0 + sz * (xy1 - xy0);
 }
 
+// FBM (Fractional Brownian Motion) noise — multi-octave turbulence.
+// Returns values roughly in [0,1] centred around ~0.5.
+BH_FUNC inline bh_real bh_fbm_noise(bh_real x, bh_real y, bh_real z, int octaves)
+{
+    bh_real value = 0.0;
+    bh_real amplitude = 0.5;
+    bh_real freq = 1.0;
+    for (int i = 0; i < octaves; ++i)
+    {
+        value += amplitude * bh_value_noise(x * freq, y * freq, z * freq);
+        freq *= 2.0;
+        amplitude *= 0.5;
+    }
+    return value;
+}
+
+// Ridged multifractal noise — creates sharp filamentary / vein-like structures.
+// Returns values in [0,1] with sharp peaks along ridges.
+BH_FUNC inline bh_real bh_ridged_noise(bh_real x, bh_real y, bh_real z, int octaves)
+{
+    bh_real value = 0.0;
+    bh_real amplitude = 0.5;
+    bh_real freq = 1.0;
+    bh_real weight = 1.0;
+    for (int i = 0; i < octaves; ++i)
+    {
+        bh_real n = bh_value_noise(x * freq, y * freq, z * freq);
+        n = 1.0 - fabs(2.0 * n - 1.0); // fold to ridge
+        n = n * n;                     // sharpen ridges
+        n *= weight;
+        value += amplitude * n;
+        weight = dclamp(n * 2.0, 0.0, 1.0); // successive octaves weighted by previous
+        freq *= 2.17;                       // slightly off 2.0 to avoid grid-aligned artifacts
+        amplitude *= 0.5;
+    }
+    return value;
+}
+
 // Stipple / particle factor: creates discrete bright specks and dim voids.
 // Returns a multiplicative modulation on disk density.
 //   stipple = 0 → returns 1.0 (no effect)
 //   stipple = 1 → full particulate texture (bright specks, dark gaps)
 BH_FUNC inline bh_real disk_stipple_factor(const dvec3 &pos, bh_real r_ks,
-                                          bh_real warped_h, const PhysicsParams &pp)
+                                           bh_real warped_h, const PhysicsParams &pp)
 {
     if (pp.disk_stipple < 1e-6)
         return 1.0;
@@ -506,7 +544,7 @@ BH_FUNC inline bh_real disk_stipple_factor(const dvec3 &pos, bh_real r_ks,
 
 // Procedural clump / streak modulation
 BH_FUNC inline bh_real disk_clump_factor(const dvec3 &pos, bh_real r_ks,
-                                        bh_real warped_h, const PhysicsParams &pp)
+                                         bh_real warped_h, const PhysicsParams &pp)
 {
     const bh_real inner_r = pp.disk_inner_r;
     const bh_real outer_r = pp.disk_outer_r;
@@ -676,9 +714,153 @@ BH_FUNC inline bh_real disk_clump_factor(const dvec3 &pos, bh_real r_ks,
     return dclamp(factor, 0.02, 3.0);
 }
 
+// ============================================================================
+// Turbulent noise density modulation
+//
+// Domain-warped FBM + ridged multifractal noise in co-moving Keplerian
+// coordinates.  This is the primary tool for breaking the "stretched taffy"
+// look: it adds organic, non-periodic density structure at multiple scales —
+// large turbulent clouds, sharp filamentary threads, grainy particulate
+// detail, sharp-edged clumps, and dark voids.
+//
+// Controlled by disk_turbulence: 0 = no effect, 1 = full noise texture.
+// Multiplied into disk_density alongside disk_clump_factor and
+// disk_stipple_factor.
+// ============================================================================
+
+BH_FUNC inline bh_real disk_noise_factor(const dvec3 &pos, bh_real r_ks,
+                                         bh_real warped_h, const PhysicsParams &pp)
+{
+    if (pp.disk_turbulence < 1e-6)
+        return 1.0;
+
+    const bh_real inner_r = pp.disk_inner_r;
+    const bh_real outer_r = pp.disk_outer_r;
+    const bh_real noise_inner = pp.disk_flat_mode ? inner_r * 0.5 : inner_r;
+    const bh_real noise_outer = pp.disk_flat_mode ? outer_r * 1.4 : outer_r;
+    if (r_ks < noise_inner || r_ks > noise_outer)
+        return 1.0;
+
+    // Co-moving coordinates: rotate with local Keplerian flow so the
+    // noise pattern orbits with the disk material.
+    const bh_real omega = 1.0 / (r_ks * sqrt(r_ks));
+    const bh_real rot_angle = pp.disk_time * omega;
+    const bh_real cos_rot = cos(rot_angle);
+    const bh_real sin_rot = sin(rot_angle);
+    const bh_real rx = pos.x * cos_rot - pos.z * sin_rot;
+    const bh_real rz = pos.x * sin_rot + pos.z * cos_rot;
+    const bh_real y_h = (warped_h > 1e-12) ? (pos.y / warped_h) : 0.0;
+
+    const bh_real r_norm = dclamp((r_ks - noise_inner) / (noise_outer - noise_inner), 0.0, 1.0);
+    const bh_real texel = compute_texel_size(pos, pp);
+    const bh_real turb = pp.disk_turbulence;
+
+    // ---- Stage 1: Domain warping ------------------------------------------------
+    // Warp coordinates with low-frequency noise to break spatial coherence.
+    // This is the single most important ingredient for organic, non-periodic
+    // structure: it bends the noise field into chaotic, turbulence-like shapes.
+    const bh_real warp_str = 1.2 * turb;
+    bh_real wx = bh_value_noise(rx * 0.3 + 5.3, rz * 0.3 + 1.7, y_h * 0.3) - 0.5;
+    bh_real wz = bh_value_noise(rx * 0.3 + 9.1, rz * 0.3 + 4.3, y_h * 0.3 + 7.1) - 0.5;
+    // Second warp pass (warp the warp) for deeper, more organic distortion
+    wx += 0.5 * (bh_value_noise(rx * 0.6 + wx * 2.0 + 3.7, rz * 0.6 + 2.2, y_h * 0.5) - 0.5);
+    wz += 0.5 * (bh_value_noise(rx * 0.6 + 8.4, rz * 0.6 + wz * 2.0 + 6.1, y_h * 0.5) - 0.5);
+    const bh_real wrx = rx + warp_str * wx;
+    const bh_real wrz = rz + warp_str * wz;
+
+    bh_real noise_mod = 0.0;
+
+    // ---- Stage 2: Large-scale turbulent density field (FBM) ---------------------
+    // Creates broad (~5–10 M) dense clouds and voids, warped into organic shapes.
+    {
+        const bh_real fade = lod_fade_linear(2.0, texel);
+        if (fade > 1e-6)
+        {
+            bh_real n = bh_fbm_noise(wrx * 0.5, wrz * 0.5, y_h * 0.8, 4);
+            noise_mod += fade * 1.0 * (n - 0.42);
+        }
+    }
+
+    // ---- Stage 3: Medium-scale ridged filaments ---------------------------------
+    // Creates sharp bright threads (~2–4 M) threading through the disk.
+    {
+        const bh_real fade = lod_fade_linear(4.0, texel);
+        if (fade > 1e-6)
+        {
+            bh_real n = bh_ridged_noise(wrx * 1.2 + 3.3, wrz * 1.2 + 1.7, y_h * 2.0, 3);
+            noise_mod += fade * 0.7 * (n - 0.25);
+        }
+    }
+
+    // ---- Stage 4: Fine-scale density granulation --------------------------------
+    // Breaks up smooth gradients into grainy, particulate detail.
+    {
+        const bh_real fade = lod_fade_linear(6.0, texel);
+        if (fade > 1e-6)
+        {
+            bh_real n = bh_value_noise(wrx * 5.0 + 7.1, wrz * 5.0 + 2.9, y_h * 4.0 + 4.3);
+            noise_mod += fade * 0.4 * (n - 0.5);
+        }
+    }
+
+    // ---- Stage 5: Very fine dust ------------------------------------------------
+    {
+        const bh_real fade = lod_fade_linear(12.0, texel);
+        if (fade > 1e-6)
+        {
+            bh_real n = bh_value_noise(wrx * 10.0 + 13.7, wrz * 10.0 + 8.1, y_h * 8.0 + 2.7);
+            noise_mod += fade * 0.25 * (n - 0.5);
+        }
+    }
+
+    // ---- Stage 6: Sharp-edged density clumps ------------------------------------
+    // Thresholded FBM creates sharp boundaries between dense knots and voids.
+    {
+        const bh_real fade = lod_fade_linear(3.0, texel);
+        if (fade > 1e-6)
+        {
+            bh_real n = bh_fbm_noise(wrx * 0.8 + 11.1, wrz * 0.8 + 8.3, y_h * 1.5 + 5.7, 3);
+            bh_real edge = dclamp((n - 0.42) / 0.08, 0.0, 1.0);
+            noise_mod += fade * 0.8 * (edge - 0.5);
+        }
+    }
+
+    // ---- Stage 7: Dark voids ----------------------------------------------------
+    // Creates distinct holes / gaps in the density field.
+    {
+        const bh_real fade = lod_fade_linear(2.5, texel);
+        if (fade > 1e-6)
+        {
+            bh_real n = bh_fbm_noise(wrx * 0.6 + 17.3, wrz * 0.6 + 14.9, y_h * 1.0 + 11.2, 3);
+            bh_real hole = dclamp((0.40 - n) / 0.06, 0.0, 1.0);
+            noise_mod -= fade * 0.6 * hole;
+        }
+    }
+
+    // Flat mode: extra medium-scale filaments and stronger contrast
+    if (pp.disk_flat_mode)
+    {
+        const bh_real fade = lod_fade_linear(5.0, texel);
+        if (fade > 1e-6)
+        {
+            bh_real n = bh_ridged_noise(wrx * 2.5 + 21.1, wrz * 2.5 + 19.3, y_h * 3.0, 3);
+            noise_mod += fade * 0.5 * (n - 0.2);
+        }
+        noise_mod *= 1.3;
+    }
+
+    // Radial envelope: full strength at mid-radius, fade toward edges
+    const bh_real edge_env = sqrt(bh_fmax(4.0 * r_norm * (1.0 - r_norm), 0.0));
+    noise_mod *= (0.4 + 0.6 * edge_env);
+
+    // Convert to multiplicative factor, scaled by turbulence parameter
+    const bh_real factor = bh_fmax(1.0 + turb * noise_mod, 0.05);
+    return dclamp(factor, 0.05, 4.0);
+}
+
 // Gas density: power-law radial, Gaussian vertical
 BH_FUNC inline bh_real disk_density(const dvec3 &pos, bh_real r_ks,
-                                   bh_real warped_h, const PhysicsParams &pp)
+                                    bh_real warped_h, const PhysicsParams &pp)
 {
     const bh_real inner_r = pp.disk_inner_r;
     const bh_real outer_r = pp.disk_outer_r;
@@ -724,6 +906,7 @@ BH_FUNC inline bh_real disk_density(const dvec3 &pos, bh_real r_ks,
     return density_scale * pp.disk_density0 * radial * vertical *
            disk_clump_factor(pos, r_ks, warped_h, pp) *
            disk_stipple_factor(pos, r_ks, warped_h, pp) *
+           disk_noise_factor(pos, r_ks, warped_h, pp) *
            outer_fade * inner_fade;
 }
 
@@ -751,10 +934,10 @@ BH_FUNC inline bh_real disk_temperature(bh_real r_ks, const PhysicsParams &pp)
     // Novikov-Thorne profile always references the physical ISCO
     const bh_real x_ratio = r_ks / isco;
     const bh_real factor = (1.0 / (x_ratio * x_ratio * x_ratio)) *
-                          bh_fmax(1.0 - sqrt(1.0 / x_ratio), 0.0);
+                           bh_fmax(1.0 - sqrt(1.0 / x_ratio), 0.0);
     const bh_real peak_x = 49.0 / 36.0;
     const bh_real peak_val = (1.0 / (peak_x * peak_x * peak_x)) *
-                            (1.0 - sqrt(1.0 / peak_x));
+                             (1.0 - sqrt(1.0 / peak_x));
     const bh_real T4 = factor / peak_val;
 
     bh_real outer_fade = 1.0;
@@ -773,7 +956,7 @@ BH_FUNC inline bh_real disk_temperature(bh_real r_ks, const PhysicsParams &pp)
 // that shift the blackbody color across the disk surface.
 // Returns a multiplier on temperature (centered around 1.0).
 BH_FUNC inline bh_real disk_temperature_perturbation(const dvec3 &pos, bh_real r_ks,
-                                                    const PhysicsParams &pp)
+                                                     const PhysicsParams &pp)
 {
     if (!pp.disk_flat_mode)
         return 1.0;
@@ -920,10 +1103,10 @@ BH_FUNC inline dvec3 disk_emissivity(const dvec3 &pos, bh_real r_ks,
         const bh_real r_norm = dclamp((r_ks - inner_r) / (outer_r - inner_r), 0.0, 1.0);
 
         const bh_real hue = 0.6 * sin(1.0 * phi - 4.0 * log_r + 0.5) +
-                           0.4 * sin(1.0 * phi - 6.0 * log_r + 2.1) +
-                           0.3 * cos(1.0 * phi - 8.0 * log_r + 1.7);
+                            0.4 * sin(1.0 * phi - 6.0 * log_r + 2.1) +
+                            0.3 * cos(1.0 * phi - 8.0 * log_r + 1.7);
         const bh_real hue2 = 0.5 * sin(1.0 * phi - 5.0 * log_r + 3.3) +
-                            0.3 * cos(1.0 * phi - 9.0 * log_r + 0.9);
+                             0.3 * cos(1.0 * phi - 9.0 * log_r + 0.9);
 
         const bh_real radial_hue = 1.0 - 2.0 * r_norm;
         const bh_real mat = 0.5 + 0.5 * hue2;
@@ -1265,7 +1448,7 @@ BH_FUNC inline void sample_disk_volume(const dvec3 &pos, const dvec3 &vel, bh_re
     const bh_real k_lower3 = v3 + twoH * lz * l_dot_k;
 
     bh_real k_dot_u = k_lower0 * gas_u.t + k_lower1 * gas_u.x +
-                     k_lower2 * gas_u.y + k_lower3 * gas_u.z;
+                      k_lower2 * gas_u.y + k_lower3 * gas_u.z;
     if (fabs(k_dot_u) < 1e-15)
         k_dot_u = 1e-15;
 
