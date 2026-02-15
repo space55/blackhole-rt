@@ -57,12 +57,12 @@ cmake .. && cmake --build .
 ./filmgrain [options] input.tga [output.tga]
 ```
 
-| Option       | Default         | Description                                |
-| ------------ | --------------- | ------------------------------------------ |
-| `-s <val>`   | `0.15`          | Grain strength (0.0–1.0)                   |
-| `-g <val>`   | `1.0`           | Grain size in pixels (>1 = coarser clumps) |
-| `-seed <n>`  | `42`            | RNG seed (deterministic for animation)     |
-| `-mono`      | _(off)_         | Monochromatic grain (default: per-channel) |
+| Option      | Default | Description                                |
+| ----------- | ------- | ------------------------------------------ |
+| `-s <val>`  | `0.15`  | Grain strength (0.0–1.0)                   |
+| `-g <val>`  | `1.0`   | Grain size in pixels (>1 = coarser clumps) |
+| `-seed <n>` | `42`    | RNG seed (deterministic for animation)     |
+| `-mono`     | _(off)_ | Monochromatic grain (default: per-channel) |
 
 If no output path is given, defaults to `input_grain.tga`.
 

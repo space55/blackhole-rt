@@ -61,11 +61,11 @@ The binary `bhrt3` will be created in the `build/` directory.
 
 ### Build options
 
-| Option             | Default   | Description                                    |
-| ------------------ | --------- | ---------------------------------------------- |
-| `USE_GPU`          | `OFF`     | Enable CUDA GPU acceleration                   |
+| Option             | Default   | Description                                                                         |
+| ------------------ | --------- | ----------------------------------------------------------------------------------- |
+| `USE_GPU`          | `OFF`     | Enable CUDA GPU acceleration                                                        |
 | `USE_FLOAT`        | `OFF`     | Use fp32 instead of fp64 for all physics (~2× faster on GPU, 32× on consumer cards) |
-| `CMAKE_BUILD_TYPE` | `Release` | `Release` for optimised, `Debug` for debugging |
+| `CMAKE_BUILD_TYPE` | `Release` | `Release` for optimised, `Debug` for debugging                                      |
 
 ```bash
 # GPU build (requires CUDA toolkit)
@@ -140,11 +140,11 @@ All parameters are set in a plain-text `scene.txt` file using `key = value` synt
 
 ### Ray Integration
 
-| Key             | Default | Description                                           |
-| --------------- | ------- | ----------------------------------------------------- |
-| `base_dt`       | `0.1`   | Base integration step size                            |
-| `max_affine`    | `100.0` | Maximum affine parameter (ray lifetime)               |
-| `escape_radius` | `50.0`  | Rays beyond this radius are considered escaped        |
+| Key             | Default | Description                                            |
+| --------------- | ------- | ------------------------------------------------------ |
+| `base_dt`       | `0.1`   | Base integration step size                             |
+| `max_affine`    | `100.0` | Maximum affine parameter (ray lifetime)                |
+| `escape_radius` | `50.0`  | Rays beyond this radius are considered escaped         |
 | `max_iter`      | `50000` | Hard iteration cap per ray (bounds photon-sphere cost) |
 
 ### Accretion Disk
@@ -225,14 +225,14 @@ See [tools/filmgrain](#filmgrain) below.
 
 Uses ffmpeg to encode the frame sequence into an H.264 video. Auto-detects flared frames if present. Options:
 
-| Flag | Default          | Description                              |
-| ---- | ---------------- | ---------------------------------------- |
-| `-i` | _(auto-detect)_  | Input frames directory                   |
-| `-p` | `frame`          | Frame filename prefix                    |
-| `-o` | `blackhole.mp4`  | Output video filename                    |
-| `-r` | `24`             | Framerate (fps)                          |
-| `-c` | `18`             | H.264 CRF quality (0 = lossless, 51 = worst) |
-| `-f` | `tga`            | Input frame format (`tga`, `exr`, `hdr`) |
+| Flag | Default         | Description                                  |
+| ---- | --------------- | -------------------------------------------- |
+| `-i` | _(auto-detect)_ | Input frames directory                       |
+| `-p` | `frame`         | Frame filename prefix                        |
+| `-o` | `blackhole.mp4` | Output video filename                        |
+| `-r` | `24`            | Framerate (fps)                              |
+| `-c` | `18`            | H.264 CRF quality (0 = lossless, 51 = worst) |
+| `-f` | `tga`           | Input frame format (`tga`, `exr`, `hdr`)     |
 
 ### Distributed rendering
 
@@ -287,12 +287,12 @@ cmake .. && cmake --build .
 ./filmgrain [options] input.tga [output.tga]
 ```
 
-| Option     | Default | Description                                  |
-| ---------- | ------- | -------------------------------------------- |
-| `-s`       | `0.15`  | Grain strength (0.0–1.0)                     |
-| `-g`       | `1.0`   | Grain size in pixels (>1 = coarser clumps)   |
-| `-seed`    | `42`    | RNG seed (same seed = same grain pattern)    |
-| `-mono`    | _(off)_ | Monochromatic grain (default: per-channel)   |
+| Option  | Default | Description                                |
+| ------- | ------- | ------------------------------------------ |
+| `-s`    | `0.15`  | Grain strength (0.0–1.0)                   |
+| `-g`    | `1.0`   | Grain size in pixels (>1 = coarser clumps) |
+| `-seed` | `42`    | RNG seed (same seed = same grain pattern)  |
+| `-mono` | _(off)_ | Monochromatic grain (default: per-channel) |
 
 ## Flaresim
 
