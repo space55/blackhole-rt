@@ -16,13 +16,22 @@
 
 set -euo pipefail
 
-# Defaults
-FRAMES_DIR="build/frames"
+# Defaults (auto-detect flared frames if present)
+FRAMES_DIR=""
 PREFIX="frame"
 OUTPUT="blackhole.mp4"
 FPS=24
 CRF=18
 FORMAT="tga"
+
+# Prefer flared frames if present
+if [[ -d build/frames_flared_tga && "${FORMAT}" == "tga" && $(ls build/frames_flared_tga/frame_*.tga 2>/dev/null | wc -l) -gt 0 ]]; then
+    FRAMES_DIR="build/frames_flared_tga"
+elif [[ -d build/frames_flared && ( "${FORMAT}" == "exr" || "${FORMAT}" == "hdr" ) && $(ls build/frames_flared/frame_*.${FORMAT} 2>/dev/null | wc -l) -gt 0 ]]; then
+    FRAMES_DIR="build/frames_flared"
+else
+    FRAMES_DIR="build/frames"
+fi
 
 # Parse arguments
 while getopts "i:p:o:r:c:f:h" opt; do
@@ -34,7 +43,15 @@ while getopts "i:p:o:r:c:f:h" opt; do
         c) CRF="$OPTARG" ;;
         f) FORMAT="$OPTARG" ;;
         h)
-            head -14 "$0" | tail -12
+            echo "Usage: $0 [options]"
+            echo "  -i DIR      Input frames directory  (default: build/frames_flared[_tga] if present, else build/frames)"
+            echo "  -p PREFIX   Frame filename prefix   (default: frame)"
+            echo "  -o FILE     Output video filename   (default: blackhole.mp4)"
+            echo "  -r FPS      Framerate               (default: 30)"
+            echo "  -c CRF      Quality (0=lossless, 23=default, 51=worst)  (default: 18)"
+            echo "  -f FORMAT   Input frame format: tga, exr, hdr  (default: tga)"
+            echo
+            echo "If build/frames_flared[_tga] exists and contains frames, it is used by default."
             exit 0
             ;;
         *) exit 1 ;;
@@ -53,10 +70,16 @@ if [[ ! -d "$FRAMES_DIR" ]]; then
     exit 1
 fi
 
+
 NUM_FRAMES=$(ls "$FRAMES_DIR"/${PREFIX}_*.${FORMAT} 2>/dev/null | wc -l | tr -d ' ')
 if [[ "$NUM_FRAMES" -eq 0 ]]; then
     echo "Error: no ${PREFIX}_*.${FORMAT} files found in $FRAMES_DIR" >&2
     exit 1
+fi
+
+# Warn if using non-flared frames
+if [[ "$FRAMES_DIR" == "build/frames" ]]; then
+    echo "Warning: using non-flared frames from build/frames. Run flare_sequence.py for lens flare."
 fi
 
 echo "Encoding $NUM_FRAMES frames from $FRAMES_DIR/${PREFIX}_NNNN.${FORMAT}"
