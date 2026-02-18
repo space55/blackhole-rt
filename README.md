@@ -359,4 +359,4 @@ The [slurm/](slurm/) directory contains scripts for distributing frame renders a
 
 ## License
 
-This project is provided as-is for educational and research purposes.
+This project is available under the MIT license
