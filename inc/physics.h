@@ -400,22 +400,32 @@ BH_FUNC inline bh_real bh_smootherstep(bh_real t)
     return t * t * t * (t * (t * 6.0 - 15.0) + 10.0);
 }
 
-// 3D value noise in [0,1] — trilinear interpolation of hashed lattice values
+// 3D value noise in [0,1] — trilinear interpolation of hashed lattice values.
+// Input coordinates are skewed by an irrational rotation so that the integer
+// lattice axes never align with the Cartesian XZ plane — this prevents the
+// grid pattern from becoming visible when viewed top-down.
 BH_FUNC inline bh_real bh_value_noise(bh_real x, bh_real y, bh_real z)
 {
-    int ix = (int)floor(x), iy = (int)floor(y), iz = (int)floor(z);
-    bh_real fx = x - ix, fy = y - iy, fz = z - iz;
-    bh_real sx = bh_smootherstep(fx), sy = bh_smootherstep(fy), sz = bh_smootherstep(fz);
+    // Skew: rotate (x,z) by ~32.7° and shear y so no viewing angle
+    // lines up with the lattice.  The constants are irrational-ish
+    // (golden-ratio derived) to avoid any periodic alignment.
+    const bh_real sx0 = 0.8412 * x + 0.5408 * z + 0.1372 * y;
+    const bh_real sy0 = -0.3017 * x + 0.9234 * y + 0.2391 * z;
+    const bh_real sz0 = -0.4490 * z + 0.8944 * x - 0.1829 * y;
+
+    int ix = (int)floor(sx0), iy = (int)floor(sy0), iz = (int)floor(sz0);
+    bh_real fx = sx0 - ix, fy = sy0 - iy, fz = sz0 - iz;
+    bh_real sfx = bh_smootherstep(fx), sfy = bh_smootherstep(fy), sfz = bh_smootherstep(fz);
 
     bh_real c000 = bh_hash_01(ix, iy, iz), c100 = bh_hash_01(ix + 1, iy, iz);
     bh_real c010 = bh_hash_01(ix, iy + 1, iz), c110 = bh_hash_01(ix + 1, iy + 1, iz);
     bh_real c001 = bh_hash_01(ix, iy, iz + 1), c101 = bh_hash_01(ix + 1, iy, iz + 1);
     bh_real c011 = bh_hash_01(ix, iy + 1, iz + 1), c111 = bh_hash_01(ix + 1, iy + 1, iz + 1);
 
-    bh_real x00 = c000 + sx * (c100 - c000), x10 = c010 + sx * (c110 - c010);
-    bh_real x01 = c001 + sx * (c101 - c001), x11 = c011 + sx * (c111 - c011);
-    bh_real xy0 = x00 + sy * (x10 - x00), xy1 = x01 + sy * (x11 - x01);
-    return xy0 + sz * (xy1 - xy0);
+    bh_real x00 = c000 + sfx * (c100 - c000), x10 = c010 + sfx * (c110 - c010);
+    bh_real x01 = c001 + sfx * (c101 - c001), x11 = c011 + sfx * (c111 - c011);
+    bh_real xy0 = x00 + sfy * (x10 - x00), xy1 = x01 + sfy * (x11 - x01);
+    return xy0 + sfz * (xy1 - xy0);
 }
 
 // FBM (Fractional Brownian Motion) noise — multi-octave turbulence.
