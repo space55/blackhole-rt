@@ -64,8 +64,8 @@ BH_FUNC inline bh_real compute_event_horizon(bh_real M, bh_real a)
 BH_FUNC inline bh_real compute_isco(bh_real M, bh_real a)
 {
     const bh_real astar = a / M;
-    const bh_real Z1 = 1.0 + cbrt(1.0 - astar * astar) *
-                                 (cbrt(1.0 + astar) + cbrt(1.0 - astar));
+    const bh_real Z1 = 1.0 + bh_cbrt(1.0 - astar * astar) *
+                                 (bh_cbrt(1.0 + astar) + bh_cbrt(1.0 - astar));
     const bh_real Z2 = sqrt(3.0 * astar * astar + Z1 * Z1);
     return M * (3.0 + Z2 - sqrt((3.0 - Z1) * (3.0 + Z1 + 2.0 * Z2)));
 }
@@ -74,7 +74,7 @@ BH_FUNC inline bh_real compute_isco(bh_real M, bh_real a)
 // Kerr-Schild radius from Cartesian coordinates (spin axis = y)
 // ============================================================================
 
-BH_FUNC inline bh_real ks_radius(const dvec3 &pos, bh_real spin)
+BH_FUNC inline bh_real ks_radius(BH_THREAD const dvec3 &pos, bh_real spin)
 {
     const bh_real a2 = spin * spin;
     const bh_real rho2 = pos.x * pos.x + pos.y * pos.y + pos.z * pos.z;
@@ -95,7 +95,7 @@ BH_FUNC inline bh_real ks_radius(const dvec3 &pos, bh_real spin)
 
 // Effective pixel footprint on disk surface (world-space units)
 // Returns 0 if LOD is disabled (pixel_angle == 0).
-BH_FUNC inline bh_real compute_texel_size(const dvec3 &pos, const PhysicsParams &pp)
+BH_FUNC inline bh_real compute_texel_size(BH_THREAD const dvec3 &pos, BH_THREAD const PhysicsParams &pp)
 {
     if (pp.pixel_angle <= 0.0)
         return 0.0;
@@ -107,7 +107,7 @@ BH_FUNC inline bh_real compute_texel_size(const dvec3 &pos, const PhysicsParams 
         return 0.0;
     const bh_real texel_base = cam_dist * pp.pixel_angle;
     // Foreshortening: disk normal = (0,1,0), view dir ≈ (pos-cam)/|pos-cam|
-    const bh_real sin_incidence = fabs(dy) / cam_dist;
+    const bh_real sin_incidence = bh_fabs(dy) / cam_dist;
     return texel_base / bh_fmax(sin_incidence, 0.002); // cap at 500× stretch
 }
 
@@ -127,7 +127,7 @@ BH_FUNC inline bh_real lod_fade_logr(bh_real k, bh_real r_ks, bh_real texel_size
     return t * t * (3.0 - 2.0 * t); // smoothstep
 }
 
-// Frequency fade for streak(k * log_r, sharpness) terms.
+// Frequency fade for bh_streak_power(k * log_r, sharpness) terms.
 // bh_pow(sin², sharpness) creates features sqrt(sharpness) times narrower than
 // the base wavelength.  Effective frequency ≈ k * min(sqrt(sharpness), 8).
 BH_FUNC inline bh_real lod_fade_streak(bh_real k, bh_real sharpness, bh_real r_ks, bh_real texel_size)
@@ -157,7 +157,7 @@ BH_FUNC inline bh_real lod_arc_window(bh_real phi, bh_real log_r, bh_real seed,
     return 1.0 - fade * (1.0 - window);
 }
 
-// Frequency fade for sin(k * r) or streak(k * r, ...) terms: wavelength ≈ π/k
+// Frequency fade for sin(k * r) or bh_streak_power(k * r, ...) terms: wavelength ≈ π/k
 BH_FUNC inline bh_real lod_fade_linear(bh_real k, bh_real texel_size)
 {
     if (texel_size <= 0.0)
@@ -179,8 +179,8 @@ BH_FUNC inline bh_real lod_fade_linear(bh_real k, bh_real texel_size)
 // Optionally outputs the KS radius via out_r.
 // ============================================================================
 
-BH_FUNC inline dvec3 geodesic_accel(const dvec3 &pos, const dvec3 &vel,
-                                    const PhysicsParams &pp, bh_real *out_r = nullptr)
+BH_FUNC inline dvec3 geodesic_accel(BH_THREAD const dvec3 &pos, BH_THREAD const dvec3 &vel,
+                                    BH_THREAD const PhysicsParams &pp, BH_THREAD bh_real *out_r = nullptr)
 {
     const bh_real px = pos.x, py = pos.y, pz = pos.z;
     const bh_real a = pp.bh_spin, a2 = a * a;
@@ -315,8 +315,16 @@ BH_FUNC inline dvec3 geodesic_accel(const dvec3 &pos, const dvec3 &vel,
 // Accretion Disk Physics
 // ============================================================================
 
+// Helper: raised-sin² — replaces the local lambdas `dip`, `streak`, `streak_fn`
+// that are not supported in Metal Shading Language (no lambdas).
+BH_FUNC inline bh_real bh_streak_power(bh_real phase, bh_real sharpness)
+{
+    const bh_real s = sin(phase);
+    return bh_pow(s * s, sharpness);
+}
+
 // Half-thickness: linearly flared, h(r) = thickness * (r / r_ref)
-BH_FUNC inline bh_real disk_half_thickness(bh_real r_ks, const PhysicsParams &pp)
+BH_FUNC inline bh_real disk_half_thickness(bh_real r_ks, BH_THREAD const PhysicsParams &pp)
 {
     bh_real h = pp.disk_thickness * (r_ks / pp.disk_r_ref);
     if (pp.disk_flat_mode)
@@ -325,8 +333,8 @@ BH_FUNC inline bh_real disk_half_thickness(bh_real r_ks, const PhysicsParams &pp
 }
 
 // Turbulence-warped half-thickness (azimuthal lumps, gaps, warps)
-BH_FUNC inline bh_real disk_warped_half_thickness(const dvec3 &pos, bh_real r_ks,
-                                                  const PhysicsParams &pp)
+BH_FUNC inline bh_real disk_warped_half_thickness(BH_THREAD const dvec3 &pos, bh_real r_ks,
+                                                  BH_THREAD const PhysicsParams &pp)
 {
     const bh_real h0 = disk_half_thickness(bh_fmin(r_ks, pp.disk_outer_r), pp);
     bh_real turb = pp.disk_turbulence;
@@ -351,13 +359,8 @@ BH_FUNC inline bh_real disk_warped_half_thickness(const dvec3 &pos, bh_real r_ks
     warp += 0.08 * sin(3.0 * (phi + tp) - 25.0 * log_r + 3.1);
 
     // Narrow gaps — concentric dark rings
-    auto dip = [](bh_real phase, bh_real sharpness) -> bh_real
-    {
-        bh_real s = sin(phase);
-        return bh_pow(s * s, sharpness);
-    };
-    warp -= 0.70 * dip(1.0 * (phi + tp) - 4.0 * log_r + 2.5, 40.0);
-    warp -= 0.40 * dip(1.0 * (phi + tp) - 7.0 * log_r + 0.3, 50.0);
+    warp -= 0.70 * bh_streak_power(1.0 * (phi + tp) - 4.0 * log_r + 2.5, 40.0);
+    warp -= 0.40 * bh_streak_power(1.0 * (phi + tp) - 7.0 * log_r + 0.3, 50.0);
 
     // Flat-mode extra high-frequency geometric turbulence
     if (pp.disk_flat_mode)
@@ -365,8 +368,8 @@ BH_FUNC inline bh_real disk_warped_half_thickness(const dvec3 &pos, bh_real r_ks
         warp += 0.45 * sin(2.0 * (phi + tp) - 16.0 * log_r + 0.9);
         warp += 0.35 * sin(3.0 * (phi + tp) - 22.0 * log_r + 3.6);
         warp += 0.25 * sin(4.0 * (phi + tp) - 30.0 * log_r + 5.8);
-        warp -= 0.50 * dip(1.0 * (phi + tp) - 10.0 * log_r + 1.7, 50.0);
-        warp -= 0.35 * dip(2.0 * (phi + tp) - 15.0 * log_r + 4.3, 60.0);
+        warp -= 0.50 * bh_streak_power(1.0 * (phi + tp) - 10.0 * log_r + 1.7, 50.0);
+        warp -= 0.35 * bh_streak_power(2.0 * (phi + tp) - 15.0 * log_r + 4.3, 60.0);
     }
 
     const bh_real factor = 1.0 + turb * warp;
@@ -455,8 +458,8 @@ BH_FUNC inline bh_real bh_ridged_noise(bh_real x, bh_real y, bh_real z, int octa
     for (int i = 0; i < octaves; ++i)
     {
         bh_real n = bh_value_noise(x * freq, y * freq, z * freq);
-        n = 1.0 - fabs(2.0 * n - 1.0); // fold to ridge
-        n = n * n;                     // sharpen ridges
+        n = 1.0 - bh_fabs(2.0 * n - 1.0); // fold to ridge
+        n = n * n;                        // sharpen ridges
         n *= weight;
         value += amplitude * n;
         weight = dclamp(n * 2.0, 0.0, 1.0); // successive octaves weighted by previous
@@ -470,8 +473,8 @@ BH_FUNC inline bh_real bh_ridged_noise(bh_real x, bh_real y, bh_real z, int octa
 // Returns a multiplicative modulation on disk density.
 //   stipple = 0 → returns 1.0 (no effect)
 //   stipple = 1 → full particulate texture (bright specks, dark gaps)
-BH_FUNC inline bh_real disk_stipple_factor(const dvec3 &pos, bh_real r_ks,
-                                           bh_real warped_h, const PhysicsParams &pp)
+BH_FUNC inline bh_real disk_stipple_factor(BH_THREAD const dvec3 &pos, bh_real r_ks,
+                                           bh_real warped_h, BH_THREAD const PhysicsParams &pp)
 {
     if (pp.disk_stipple < 1e-6)
         return 1.0;
@@ -553,8 +556,8 @@ BH_FUNC inline bh_real disk_stipple_factor(const dvec3 &pos, bh_real r_ks,
 }
 
 // Procedural clump / streak modulation
-BH_FUNC inline bh_real disk_clump_factor(const dvec3 &pos, bh_real r_ks,
-                                         bh_real warped_h, const PhysicsParams &pp)
+BH_FUNC inline bh_real disk_clump_factor(BH_THREAD const dvec3 &pos, bh_real r_ks,
+                                         bh_real warped_h, BH_THREAD const PhysicsParams &pp)
 {
     const bh_real inner_r = pp.disk_inner_r;
     const bh_real outer_r = pp.disk_outer_r;
@@ -579,78 +582,68 @@ BH_FUNC inline bh_real disk_clump_factor(const dvec3 &pos, bh_real r_ks,
     // LOD: compute texel footprint for frequency clamping
     const bh_real texel = compute_texel_size(pos, pp);
 
-    auto streak = [](bh_real phase, bh_real sharpness) -> bh_real
-    {
-        const bh_real s = sin(phase);
-        return bh_pow(s * s, sharpness);
-    };
-
     // Arc-length window: product of sin² at incommensurate radial frequencies
     // creates quasi-random azimuthal windows (fragmented arcs).
     // brevity controls arc shortness: 0 = full rings, 1 = ~half-orbit, 3+ = ~1/10th orbit
     // seed offsets ensure each streak fragments independently.
     // LOD: fades toward 1.0 (full rings) when pattern would alias.
-    auto arc_window = [r_ks, texel](bh_real phi, bh_real log_r, bh_real seed, bh_real brevity) -> bh_real
-    {
-        return lod_arc_window(phi, log_r, seed, brevity, r_ks, texel);
-    };
 
     bh_real mod = 0.0;
 
     // Large-scale concentric arcs — radial freq dominates for Gargantua look
-    mod += lod_fade_streak(4.0, 30.0, r_ks, texel) * 1.4 * streak(1.0 * (phi + t_phase) - 4.0 * log_r + 0.5 + y_phase, 30.0) * arc_window(phi, log_r, 0.5, 0.4);
-    mod += lod_fade_streak(6.0, 25.0, r_ks, texel) * 0.7 * streak(1.0 * (phi + t_phase) - 6.0 * log_r + 2.1 + 1.5 * y_phase, 25.0) * arc_window(phi, log_r, 2.1, 0.5);
+    mod += lod_fade_streak(4.0, 30.0, r_ks, texel) * 1.4 * bh_streak_power(1.0 * (phi + t_phase) - 4.0 * log_r + 0.5 + y_phase, 30.0) * lod_arc_window(phi, log_r, 0.5, 0.4, r_ks, texel);
+    mod += lod_fade_streak(6.0, 25.0, r_ks, texel) * 0.7 * bh_streak_power(1.0 * (phi + t_phase) - 6.0 * log_r + 2.1 + 1.5 * y_phase, 25.0) * lod_arc_window(phi, log_r, 2.1, 0.5, r_ks, texel);
 
     // Medium-scale concentric bands
-    mod += lod_fade_streak(10.0, 20.0, r_ks, texel) * 0.45 * streak(2.0 * (phi + t_phase) - 10.0 * log_r + 1.3 + 2.0 * y_phase, 20.0) * arc_window(phi, log_r, 1.3, 0.6);
-    mod += lod_fade_streak(14.0, 20.0, r_ks, texel) * 0.35 * streak(2.0 * (phi + t_phase) - 14.0 * log_r - 0.8 + 2.5 * y_phase, 20.0) * arc_window(phi, log_r, 3.8, 0.7);
+    mod += lod_fade_streak(10.0, 20.0, r_ks, texel) * 0.45 * bh_streak_power(2.0 * (phi + t_phase) - 10.0 * log_r + 1.3 + 2.0 * y_phase, 20.0) * lod_arc_window(phi, log_r, 1.3, 0.6, r_ks, texel);
+    mod += lod_fade_streak(14.0, 20.0, r_ks, texel) * 0.35 * bh_streak_power(2.0 * (phi + t_phase) - 14.0 * log_r - 0.8 + 2.5 * y_phase, 20.0) * lod_arc_window(phi, log_r, 3.8, 0.7, r_ks, texel);
 
     // Fine-scale concentric filaments
-    mod += lod_fade_logr(20.0, r_ks, texel) * 0.25 * sin(3.0 * (phi + t_phase) - 20.0 * log_r + 3.7 + 3.0 * y_phase) * arc_window(phi, log_r, 3.7, 0.8);
-    mod += lod_fade_logr(28.0, r_ks, texel) * 0.15 * sin(3.0 * (phi + t_phase) - 28.0 * log_r + 0.4 + 4.0 * y_phase) * arc_window(phi, log_r, 0.4, 0.9);
-    mod += lod_fade_logr(36.0, r_ks, texel) * 0.10 * sin(4.0 * (phi + t_phase) - 36.0 * log_r + 5.2 + 5.0 * y_phase) * arc_window(phi, log_r, 5.2, 1.0);
+    mod += lod_fade_logr(20.0, r_ks, texel) * 0.25 * sin(3.0 * (phi + t_phase) - 20.0 * log_r + 3.7 + 3.0 * y_phase) * lod_arc_window(phi, log_r, 3.7, 0.8, r_ks, texel);
+    mod += lod_fade_logr(28.0, r_ks, texel) * 0.15 * sin(3.0 * (phi + t_phase) - 28.0 * log_r + 0.4 + 4.0 * y_phase) * lod_arc_window(phi, log_r, 0.4, 0.9, r_ks, texel);
+    mod += lod_fade_logr(36.0, r_ks, texel) * 0.10 * sin(4.0 * (phi + t_phase) - 36.0 * log_r + 5.2 + 5.0 * y_phase) * lod_arc_window(phi, log_r, 5.2, 1.0, r_ks, texel);
 
     // Radial hot-spot rings
-    mod += lod_fade_linear(5.0, texel) * 0.40 * streak(5.0 * r_ks + 1.0 + 0.5 * y_phase, 20.0) *
-           cos(1.0 * (phi + t_phase) - 3.0 * log_r + y_phase) * arc_window(phi, log_r, 1.0, 0.8);
+    mod += lod_fade_linear(5.0, texel) * 0.40 * bh_streak_power(5.0 * r_ks + 1.0 + 0.5 * y_phase, 20.0) *
+           cos(1.0 * (phi + t_phase) - 3.0 * log_r + y_phase) * lod_arc_window(phi, log_r, 1.0, 0.8, r_ks, texel);
 
     // Bright knots
-    mod += lod_fade_streak(10.0, 20.0, r_ks, texel) * 0.35 * streak(4.0 * M_PI * r_norm, 20.0) *
-           streak(2.0 * (phi + t_phase) - 10.0 * log_r + 1.9 + 2.0 * y_phase, 20.0) * arc_window(phi, log_r, 1.9, 1.2);
+    mod += lod_fade_streak(10.0, 20.0, r_ks, texel) * 0.35 * bh_streak_power(4.0 * M_PI * r_norm, 20.0) *
+           bh_streak_power(2.0 * (phi + t_phase) - 10.0 * log_r + 1.9 + 2.0 * y_phase, 20.0) * lod_arc_window(phi, log_r, 1.9, 1.2, r_ks, texel);
 
     // Dark lanes — concentric gaps
-    mod -= lod_fade_streak(6.0, 40.0, r_ks, texel) * 0.50 * streak(1.0 * (phi + t_phase) - 6.0 * log_r + 4.0 + 1.8 * y_phase, 40.0) * arc_window(phi, log_r, 4.0, 0.6);
-    mod -= lod_fade_streak(10.0, 50.0, r_ks, texel) * 0.30 * streak(1.0 * (phi + t_phase) - 10.0 * log_r + 0.7 + 2.2 * y_phase, 50.0) * arc_window(phi, log_r, 0.7, 0.7);
+    mod -= lod_fade_streak(6.0, 40.0, r_ks, texel) * 0.50 * bh_streak_power(1.0 * (phi + t_phase) - 6.0 * log_r + 4.0 + 1.8 * y_phase, 40.0) * lod_arc_window(phi, log_r, 4.0, 0.6, r_ks, texel);
+    mod -= lod_fade_streak(10.0, 50.0, r_ks, texel) * 0.30 * bh_streak_power(1.0 * (phi + t_phase) - 10.0 * log_r + 0.7 + 2.2 * y_phase, 50.0) * lod_arc_window(phi, log_r, 0.7, 0.7, r_ks, texel);
 
     // --- Flat-mode extra turbulence: heavy procedural detail at all scales ---
     if (pp.disk_flat_mode)
     {
         // Large-scale concentric arcs (dominant structure)
-        mod += lod_fade_streak(5.0, 20.0, r_ks, texel) * 1.0 * streak(1.0 * (phi + t_phase) - 5.0 * log_r + 3.3 + y_phase, 20.0) * arc_window(phi, log_r, 3.3, 0.5);
-        mod += lod_fade_streak(8.0, 25.0, r_ks, texel) * 0.80 * streak(1.0 * (phi + t_phase) - 8.0 * log_r + 0.8 + 1.2 * y_phase, 25.0) * arc_window(phi, log_r, 0.8, 0.6);
+        mod += lod_fade_streak(5.0, 20.0, r_ks, texel) * 1.0 * bh_streak_power(1.0 * (phi + t_phase) - 5.0 * log_r + 3.3 + y_phase, 20.0) * lod_arc_window(phi, log_r, 3.3, 0.5, r_ks, texel);
+        mod += lod_fade_streak(8.0, 25.0, r_ks, texel) * 0.80 * bh_streak_power(1.0 * (phi + t_phase) - 8.0 * log_r + 0.8 + 1.2 * y_phase, 25.0) * lod_arc_window(phi, log_r, 0.8, 0.6, r_ks, texel);
 
         // Fine concentric filaments — many closely-spaced rings
-        mod += lod_fade_streak(15.0, 30.0, r_ks, texel) * 0.65 * streak(2.0 * (phi + t_phase) - 15.0 * log_r + 2.3 + 1.5 * y_phase, 30.0) * arc_window(phi, log_r, 2.3, 0.8);
-        mod += lod_fade_streak(22.0, 25.0, r_ks, texel) * 0.50 * streak(3.0 * (phi + t_phase) - 22.0 * log_r + 4.7 + 2.0 * y_phase, 25.0) * arc_window(phi, log_r, 4.7, 0.9);
-        mod += lod_fade_streak(30.0, 20.0, r_ks, texel) * 0.40 * streak(3.0 * (phi + t_phase) - 30.0 * log_r + 1.1 + 3.0 * y_phase, 20.0) * arc_window(phi, log_r, 1.1, 1.0);
-        mod += lod_fade_logr(40.0, r_ks, texel) * 0.30 * sin(4.0 * (phi + t_phase) - 40.0 * log_r + 3.9 + 2.5 * y_phase) * arc_window(phi, log_r, 3.9, 1.1);
-        mod += lod_fade_logr(50.0, r_ks, texel) * 0.25 * sin(5.0 * (phi + t_phase) - 50.0 * log_r + 0.6 + 4.0 * y_phase) * arc_window(phi, log_r, 0.6, 1.2);
-        mod += lod_fade_logr(60.0, r_ks, texel) * 0.20 * sin(6.0 * (phi + t_phase) - 60.0 * log_r + 1.4 + 5.0 * y_phase) * arc_window(phi, log_r, 1.4, 1.3);
-        mod += lod_fade_logr(70.0, r_ks, texel) * 0.15 * sin(7.0 * (phi + t_phase) - 70.0 * log_r + 4.2 + 6.0 * y_phase) * arc_window(phi, log_r, 4.2, 1.4);
+        mod += lod_fade_streak(15.0, 30.0, r_ks, texel) * 0.65 * bh_streak_power(2.0 * (phi + t_phase) - 15.0 * log_r + 2.3 + 1.5 * y_phase, 30.0) * lod_arc_window(phi, log_r, 2.3, 0.8, r_ks, texel);
+        mod += lod_fade_streak(22.0, 25.0, r_ks, texel) * 0.50 * bh_streak_power(3.0 * (phi + t_phase) - 22.0 * log_r + 4.7 + 2.0 * y_phase, 25.0) * lod_arc_window(phi, log_r, 4.7, 0.9, r_ks, texel);
+        mod += lod_fade_streak(30.0, 20.0, r_ks, texel) * 0.40 * bh_streak_power(3.0 * (phi + t_phase) - 30.0 * log_r + 1.1 + 3.0 * y_phase, 20.0) * lod_arc_window(phi, log_r, 1.1, 1.0, r_ks, texel);
+        mod += lod_fade_logr(40.0, r_ks, texel) * 0.30 * sin(4.0 * (phi + t_phase) - 40.0 * log_r + 3.9 + 2.5 * y_phase) * lod_arc_window(phi, log_r, 3.9, 1.1, r_ks, texel);
+        mod += lod_fade_logr(50.0, r_ks, texel) * 0.25 * sin(5.0 * (phi + t_phase) - 50.0 * log_r + 0.6 + 4.0 * y_phase) * lod_arc_window(phi, log_r, 0.6, 1.2, r_ks, texel);
+        mod += lod_fade_logr(60.0, r_ks, texel) * 0.20 * sin(6.0 * (phi + t_phase) - 60.0 * log_r + 1.4 + 5.0 * y_phase) * lod_arc_window(phi, log_r, 1.4, 1.3, r_ks, texel);
+        mod += lod_fade_logr(70.0, r_ks, texel) * 0.15 * sin(7.0 * (phi + t_phase) - 70.0 * log_r + 4.2 + 6.0 * y_phase) * lod_arc_window(phi, log_r, 4.2, 1.4, r_ks, texel);
 
         // Dense concentric ring structure (Saturn-like, many bands)
         // Rings get arc-windowed too — not perfect circles
-        mod += lod_fade_linear(6.0, texel) * 0.70 * streak(6.0 * r_ks + 0.3, 30.0) * arc_window(phi, log_r, 0.3, 0.3);
-        mod += lod_fade_linear(11.0, texel) * 0.55 * streak(11.0 * r_ks + 1.7, 25.0) * arc_window(phi, log_r, 1.7, 0.4);
-        mod += lod_fade_linear(18.0, texel) * 0.45 * streak(18.0 * r_ks + 4.1, 20.0) * arc_window(phi, log_r, 4.1, 0.5);
-        mod += lod_fade_linear(27.0, texel) * 0.35 * streak(27.0 * r_ks + 2.9, 25.0) * arc_window(phi, log_r, 2.9, 0.6);
-        mod += lod_fade_linear(40.0, texel) * 0.25 * streak(40.0 * r_ks + 0.6, 20.0) * arc_window(phi, log_r, 0.6, 0.7);
+        mod += lod_fade_linear(6.0, texel) * 0.70 * bh_streak_power(6.0 * r_ks + 0.3, 30.0) * lod_arc_window(phi, log_r, 0.3, 0.3, r_ks, texel);
+        mod += lod_fade_linear(11.0, texel) * 0.55 * bh_streak_power(11.0 * r_ks + 1.7, 25.0) * lod_arc_window(phi, log_r, 1.7, 0.4, r_ks, texel);
+        mod += lod_fade_linear(18.0, texel) * 0.45 * bh_streak_power(18.0 * r_ks + 4.1, 20.0) * lod_arc_window(phi, log_r, 4.1, 0.5, r_ks, texel);
+        mod += lod_fade_linear(27.0, texel) * 0.35 * bh_streak_power(27.0 * r_ks + 2.9, 25.0) * lod_arc_window(phi, log_r, 2.9, 0.6, r_ks, texel);
+        mod += lod_fade_linear(40.0, texel) * 0.25 * bh_streak_power(40.0 * r_ks + 0.6, 20.0) * lod_arc_window(phi, log_r, 0.6, 0.7, r_ks, texel);
 
         // Sharp dark concentric gaps / ring divisions (lightly windowed)
-        mod -= lod_fade_streak(14.0, 60.0, r_ks, texel) * 0.70 * streak(2.0 * (phi + t_phase) - 14.0 * log_r + 1.4 + 2.0 * y_phase, 60.0) * arc_window(phi, log_r, 1.4, 0.3);
-        mod -= lod_fade_streak(20.0, 70.0, r_ks, texel) * 0.55 * streak(3.0 * (phi + t_phase) - 20.0 * log_r + 3.8 + 1.5 * y_phase, 70.0) * arc_window(phi, log_r, 3.8, 0.35);
-        mod -= lod_fade_streak(28.0, 50.0, r_ks, texel) * 0.45 * streak(3.0 * (phi + t_phase) - 28.0 * log_r + 0.5 + 2.5 * y_phase, 50.0) * arc_window(phi, log_r, 0.5, 0.4);
-        mod -= lod_fade_streak(38.0, 80.0, r_ks, texel) * 0.35 * streak(4.0 * (phi + t_phase) - 38.0 * log_r + 2.7 + 1.8 * y_phase, 80.0) * arc_window(phi, log_r, 2.7, 0.45);
+        mod -= lod_fade_streak(14.0, 60.0, r_ks, texel) * 0.70 * bh_streak_power(2.0 * (phi + t_phase) - 14.0 * log_r + 1.4 + 2.0 * y_phase, 60.0) * lod_arc_window(phi, log_r, 1.4, 0.3, r_ks, texel);
+        mod -= lod_fade_streak(20.0, 70.0, r_ks, texel) * 0.55 * bh_streak_power(3.0 * (phi + t_phase) - 20.0 * log_r + 3.8 + 1.5 * y_phase, 70.0) * lod_arc_window(phi, log_r, 3.8, 0.35, r_ks, texel);
+        mod -= lod_fade_streak(28.0, 50.0, r_ks, texel) * 0.45 * bh_streak_power(3.0 * (phi + t_phase) - 28.0 * log_r + 0.5 + 2.5 * y_phase, 50.0) * lod_arc_window(phi, log_r, 0.5, 0.4, r_ks, texel);
+        mod -= lod_fade_streak(38.0, 80.0, r_ks, texel) * 0.35 * bh_streak_power(4.0 * (phi + t_phase) - 38.0 * log_r + 2.7 + 1.8 * y_phase, 80.0) * lod_arc_window(phi, log_r, 2.7, 0.45, r_ks, texel);
 
         // Dense mottling / granularity (2D — radial-dominant)
         mod += lod_fade_logr(45.0, r_ks, texel) * 0.40 * sin(5.0 * phi - 35.0 * log_r + 2.2) *
@@ -659,10 +652,10 @@ BH_FUNC inline bh_real disk_clump_factor(const dvec3 &pos, bh_real r_ks,
                cos(10.0 * phi - 65.0 * log_r + 3.7);
 
         // Caustic-like bright concentric filaments
-        mod += bh_fmin(lod_fade_streak(12.0, 50.0, r_ks, texel), lod_fade_linear(15.0, texel)) * 0.50 * streak(2.0 * (phi + t_phase) - 12.0 * log_r + 2.0, 50.0) *
-               streak(15.0 * r_ks + 3.3, 30.0) * arc_window(phi, log_r, 2.0, 1.0);
-        mod += bh_fmin(lod_fade_streak(18.0, 40.0, r_ks, texel), lod_fade_linear(21.0, texel)) * 0.35 * streak(2.0 * (phi + t_phase) - 18.0 * log_r + 4.5, 40.0) *
-               streak(21.0 * r_ks + 1.1, 25.0) * arc_window(phi, log_r, 4.5, 1.2);
+        mod += bh_fmin(lod_fade_streak(12.0, 50.0, r_ks, texel), lod_fade_linear(15.0, texel)) * 0.50 * bh_streak_power(2.0 * (phi + t_phase) - 12.0 * log_r + 2.0, 50.0) *
+               bh_streak_power(15.0 * r_ks + 3.3, 30.0) * lod_arc_window(phi, log_r, 2.0, 1.0, r_ks, texel);
+        mod += bh_fmin(lod_fade_streak(18.0, 40.0, r_ks, texel), lod_fade_linear(21.0, texel)) * 0.35 * bh_streak_power(2.0 * (phi + t_phase) - 18.0 * log_r + 4.5, 40.0) *
+               bh_streak_power(21.0 * r_ks + 1.1, 25.0) * lod_arc_window(phi, log_r, 4.5, 1.2, r_ks, texel);
 
         // Turbulent "froth" — radial-dominant fine texture
         const bh_real froth_fade = lod_fade_logr(55.0, r_ks, texel);
@@ -675,24 +668,24 @@ BH_FUNC inline bh_real disk_clump_factor(const dvec3 &pos, bh_real r_ks,
         // Inner-edge plunging streaks: short fragmented arcs near ISCO
         // High brevity (2.0-3.5) → arcs span only ~1/10th of orbit
         const bh_real inner_prox = exp(-4.0 * (r_norm - 0.0) * (r_norm - 0.0));
-        mod += lod_fade_streak(6.0, 40.0, r_ks, texel) * 1.8 * inner_prox * streak(1.0 * (phi + t_phase * 1.5) - 6.0 * log_r + 0.7, 40.0) * arc_window(phi, log_r, 0.7, 2.5);
-        mod += lod_fade_streak(10.0, 50.0, r_ks, texel) * 1.2 * inner_prox * streak(1.0 * (phi + t_phase * 1.3) - 10.0 * log_r + 2.9, 50.0) * arc_window(phi, log_r, 2.9, 3.0);
-        mod += lod_fade_streak(15.0, 60.0, r_ks, texel) * 0.8 * inner_prox * streak(2.0 * (phi + t_phase * 1.1) - 15.0 * log_r + 4.4, 60.0) * arc_window(phi, log_r, 4.4, 3.5);
-        mod += lod_fade_streak(20.0, 30.0, r_ks, texel) * 0.5 * inner_prox * streak(2.0 * (phi + t_phase * 0.9) - 20.0 * log_r + 1.2, 30.0) * arc_window(phi, log_r, 1.2, 2.0);
+        mod += lod_fade_streak(6.0, 40.0, r_ks, texel) * 1.8 * inner_prox * bh_streak_power(1.0 * (phi + t_phase * 1.5) - 6.0 * log_r + 0.7, 40.0) * lod_arc_window(phi, log_r, 0.7, 2.5, r_ks, texel);
+        mod += lod_fade_streak(10.0, 50.0, r_ks, texel) * 1.2 * inner_prox * bh_streak_power(1.0 * (phi + t_phase * 1.3) - 10.0 * log_r + 2.9, 50.0) * lod_arc_window(phi, log_r, 2.9, 3.0, r_ks, texel);
+        mod += lod_fade_streak(15.0, 60.0, r_ks, texel) * 0.8 * inner_prox * bh_streak_power(2.0 * (phi + t_phase * 1.1) - 15.0 * log_r + 4.4, 60.0) * lod_arc_window(phi, log_r, 4.4, 3.5, r_ks, texel);
+        mod += lod_fade_streak(20.0, 30.0, r_ks, texel) * 0.5 * inner_prox * bh_streak_power(2.0 * (phi + t_phase * 0.9) - 20.0 * log_r + 1.2, 30.0) * lod_arc_window(phi, log_r, 1.2, 2.0, r_ks, texel);
 
         // Outer-edge trailing arcs: short fragments fading at disk edge
         // High brevity (2.0-3.0) → scattered short arcs
         const bh_real outer_prox = exp(-4.0 * (r_norm - 1.0) * (r_norm - 1.0));
-        mod += lod_fade_streak(4.0, 30.0, r_ks, texel) * 1.4 * outer_prox * streak(1.0 * (phi + t_phase) - 4.0 * log_r + 1.5, 30.0) * arc_window(phi, log_r, 1.5, 2.0);
-        mod += lod_fade_streak(7.0, 40.0, r_ks, texel) * 1.0 * outer_prox * streak(1.0 * (phi + t_phase) - 7.0 * log_r + 3.8, 40.0) * arc_window(phi, log_r, 3.8, 2.5);
-        mod += lod_fade_streak(11.0, 50.0, r_ks, texel) * 0.7 * outer_prox * streak(2.0 * (phi + t_phase) - 11.0 * log_r + 0.3, 50.0) * arc_window(phi, log_r, 0.3, 3.0);
-        mod += lod_fade_streak(16.0, 30.0, r_ks, texel) * 0.4 * outer_prox * streak(2.0 * (phi + t_phase) - 16.0 * log_r + 5.6, 30.0) * arc_window(phi, log_r, 5.6, 2.5);
+        mod += lod_fade_streak(4.0, 30.0, r_ks, texel) * 1.4 * outer_prox * bh_streak_power(1.0 * (phi + t_phase) - 4.0 * log_r + 1.5, 30.0) * lod_arc_window(phi, log_r, 1.5, 2.0, r_ks, texel);
+        mod += lod_fade_streak(7.0, 40.0, r_ks, texel) * 1.0 * outer_prox * bh_streak_power(1.0 * (phi + t_phase) - 7.0 * log_r + 3.8, 40.0) * lod_arc_window(phi, log_r, 3.8, 2.5, r_ks, texel);
+        mod += lod_fade_streak(11.0, 50.0, r_ks, texel) * 0.7 * outer_prox * bh_streak_power(2.0 * (phi + t_phase) - 11.0 * log_r + 0.3, 50.0) * lod_arc_window(phi, log_r, 0.3, 3.0, r_ks, texel);
+        mod += lod_fade_streak(16.0, 30.0, r_ks, texel) * 0.4 * outer_prox * bh_streak_power(2.0 * (phi + t_phase) - 16.0 * log_r + 5.6, 30.0) * lod_arc_window(phi, log_r, 5.6, 2.5, r_ks, texel);
 
         // Mid-radius bright arcs (gravitational lensing caustic lines)
         // Moderate brevity (1.5) → medium-length arcs
         const bh_real mid_prox = exp(-6.0 * (r_norm - 0.3) * (r_norm - 0.3));
-        mod += lod_fade_streak(4.0, 60.0, r_ks, texel) * 0.9 * mid_prox * streak(1.0 * (phi + t_phase) - 4.0 * log_r + 2.2, 60.0) * arc_window(phi, log_r, 2.2, 1.5);
-        mod += lod_fade_streak(7.0, 50.0, r_ks, texel) * 0.6 * mid_prox * streak(1.0 * (phi + t_phase) - 7.0 * log_r + 0.8, 50.0) * arc_window(phi, log_r, 0.8, 1.8);
+        mod += lod_fade_streak(4.0, 60.0, r_ks, texel) * 0.9 * mid_prox * bh_streak_power(1.0 * (phi + t_phase) - 4.0 * log_r + 2.2, 60.0) * lod_arc_window(phi, log_r, 2.2, 1.5, r_ks, texel);
+        mod += lod_fade_streak(7.0, 50.0, r_ks, texel) * 0.6 * mid_prox * bh_streak_power(1.0 * (phi + t_phase) - 7.0 * log_r + 0.8, 50.0) * lod_arc_window(phi, log_r, 0.8, 1.8, r_ks, texel);
     }
 
     // Radial envelope
@@ -738,8 +731,8 @@ BH_FUNC inline bh_real disk_clump_factor(const dvec3 &pos, bh_real r_ks,
 // disk_stipple_factor.
 // ============================================================================
 
-BH_FUNC inline bh_real disk_noise_factor(const dvec3 &pos, bh_real r_ks,
-                                         bh_real warped_h, const PhysicsParams &pp)
+BH_FUNC inline bh_real disk_noise_factor(BH_THREAD const dvec3 &pos, bh_real r_ks,
+                                         bh_real warped_h, BH_THREAD const PhysicsParams &pp)
 {
     if (pp.disk_turbulence < 1e-6)
         return 1.0;
@@ -869,8 +862,8 @@ BH_FUNC inline bh_real disk_noise_factor(const dvec3 &pos, bh_real r_ks,
 }
 
 // Gas density: power-law radial, Gaussian vertical
-BH_FUNC inline bh_real disk_density(const dvec3 &pos, bh_real r_ks,
-                                    bh_real warped_h, const PhysicsParams &pp)
+BH_FUNC inline bh_real disk_density(BH_THREAD const dvec3 &pos, bh_real r_ks,
+                                    bh_real warped_h, BH_THREAD const PhysicsParams &pp)
 {
     const bh_real inner_r = pp.disk_inner_r;
     const bh_real outer_r = pp.disk_outer_r;
@@ -921,7 +914,7 @@ BH_FUNC inline bh_real disk_density(const dvec3 &pos, bh_real r_ks,
 }
 
 // Temperature: simplified Novikov-Thorne profile
-BH_FUNC inline bh_real disk_temperature(bh_real r_ks, const PhysicsParams &pp)
+BH_FUNC inline bh_real disk_temperature(bh_real r_ks, BH_THREAD const PhysicsParams &pp)
 {
     const bh_real inner_r = pp.disk_inner_r;
     const bh_real isco = pp.disk_isco; // physical ISCO for temperature profile
@@ -965,8 +958,8 @@ BH_FUNC inline bh_real disk_temperature(bh_real r_ks, const PhysicsParams &pp)
 // Azimuthal temperature perturbation for flat mode — creates hot/cool streaks
 // that shift the blackbody color across the disk surface.
 // Returns a multiplier on temperature (centered around 1.0).
-BH_FUNC inline bh_real disk_temperature_perturbation(const dvec3 &pos, bh_real r_ks,
-                                                     const PhysicsParams &pp)
+BH_FUNC inline bh_real disk_temperature_perturbation(BH_THREAD const dvec3 &pos, bh_real r_ks,
+                                                     BH_THREAD const PhysicsParams &pp)
 {
     if (!pp.disk_flat_mode)
         return 1.0;
@@ -988,35 +981,24 @@ BH_FUNC inline bh_real disk_temperature_perturbation(const dvec3 &pos, bh_real r
     // LOD: fade high-frequency temperature terms
     const bh_real texel = compute_texel_size(pos, pp);
 
-    auto streak = [](bh_real phase, bh_real sharpness) -> bh_real
-    {
-        const bh_real s = sin(phase);
-        return bh_pow(s * s, sharpness);
-    };
-
-    auto arc_window = [r_ks, texel](bh_real phi, bh_real log_r, bh_real seed, bh_real brevity) -> bh_real
-    {
-        return lod_arc_window(phi, log_r, seed, brevity, r_ks, texel);
-    };
-
     // Large-scale concentric temperature arcs — subtle
     bh_real dT = 0.0;
-    dT += 0.10 * sin(1.0 * (phi + tp) - 4.0 * log_r + 0.5) * arc_window(phi, log_r, 7.1, 0.4);
-    dT += 0.08 * sin(1.0 * (phi + tp) - 6.0 * log_r + 2.1) * arc_window(phi, log_r, 8.3, 0.5);
-    dT += 0.06 * sin(1.0 * (phi + tp) - 8.0 * log_r + 0.7) * arc_window(phi, log_r, 9.7, 0.6);
+    dT += 0.10 * sin(1.0 * (phi + tp) - 4.0 * log_r + 0.5) * lod_arc_window(phi, log_r, 7.1, 0.4, r_ks, texel);
+    dT += 0.08 * sin(1.0 * (phi + tp) - 6.0 * log_r + 2.1) * lod_arc_window(phi, log_r, 8.3, 0.5, r_ks, texel);
+    dT += 0.06 * sin(1.0 * (phi + tp) - 8.0 * log_r + 0.7) * lod_arc_window(phi, log_r, 9.7, 0.6, r_ks, texel);
 
     // Medium-scale concentric temperature filaments
-    dT += lod_fade_logr(12.0, r_ks, texel) * 0.10 * sin(2.0 * (phi + tp) - 12.0 * log_r + 1.3) * arc_window(phi, log_r, 10.3, 0.7);
-    dT += lod_fade_logr(16.0, r_ks, texel) * 0.09 * sin(2.0 * (phi + tp) - 16.0 * log_r - 0.8) * arc_window(phi, log_r, 11.8, 0.8);
-    dT += lod_fade_logr(22.0, r_ks, texel) * 0.08 * sin(3.0 * (phi + tp) - 22.0 * log_r + 3.7) * arc_window(phi, log_r, 12.7, 0.9);
+    dT += lod_fade_logr(12.0, r_ks, texel) * 0.10 * sin(2.0 * (phi + tp) - 12.0 * log_r + 1.3) * lod_arc_window(phi, log_r, 10.3, 0.7, r_ks, texel);
+    dT += lod_fade_logr(16.0, r_ks, texel) * 0.09 * sin(2.0 * (phi + tp) - 16.0 * log_r - 0.8) * lod_arc_window(phi, log_r, 11.8, 0.8, r_ks, texel);
+    dT += lod_fade_logr(22.0, r_ks, texel) * 0.08 * sin(3.0 * (phi + tp) - 22.0 * log_r + 3.7) * lod_arc_window(phi, log_r, 12.7, 0.9, r_ks, texel);
 
     // Fine-scale: rich micro-turbulence temperature jitter (concentric)
-    dT += lod_fade_logr(30.0, r_ks, texel) * 0.10 * sin(3.0 * (phi + tp) - 30.0 * log_r + 1.1) * arc_window(phi, log_r, 13.1, 1.0);
-    dT += lod_fade_logr(40.0, r_ks, texel) * 0.09 * sin(4.0 * phi - 40.0 * log_r + 2.2) * arc_window(phi, log_r, 14.2, 1.1);
-    dT += lod_fade_logr(50.0, r_ks, texel) * 0.08 * sin(5.0 * (phi + tp) - 50.0 * log_r + 3.5) * arc_window(phi, log_r, 15.5, 1.2);
-    dT += lod_fade_logr(60.0, r_ks, texel) * 0.07 * sin(6.0 * phi - 60.0 * log_r + 0.9) * arc_window(phi, log_r, 16.9, 1.3);
-    dT += lod_fade_logr(70.0, r_ks, texel) * 0.06 * sin(7.0 * (phi + tp) - 70.0 * log_r + 4.8) * arc_window(phi, log_r, 17.8, 1.4);
-    dT += lod_fade_logr(80.0, r_ks, texel) * 0.05 * sin(8.0 * phi - 80.0 * log_r + 2.6) * arc_window(phi, log_r, 18.6, 1.5);
+    dT += lod_fade_logr(30.0, r_ks, texel) * 0.10 * sin(3.0 * (phi + tp) - 30.0 * log_r + 1.1) * lod_arc_window(phi, log_r, 13.1, 1.0, r_ks, texel);
+    dT += lod_fade_logr(40.0, r_ks, texel) * 0.09 * sin(4.0 * phi - 40.0 * log_r + 2.2) * lod_arc_window(phi, log_r, 14.2, 1.1, r_ks, texel);
+    dT += lod_fade_logr(50.0, r_ks, texel) * 0.08 * sin(5.0 * (phi + tp) - 50.0 * log_r + 3.5) * lod_arc_window(phi, log_r, 15.5, 1.2, r_ks, texel);
+    dT += lod_fade_logr(60.0, r_ks, texel) * 0.07 * sin(6.0 * phi - 60.0 * log_r + 0.9) * lod_arc_window(phi, log_r, 16.9, 1.3, r_ks, texel);
+    dT += lod_fade_logr(70.0, r_ks, texel) * 0.06 * sin(7.0 * (phi + tp) - 70.0 * log_r + 4.8) * lod_arc_window(phi, log_r, 17.8, 1.4, r_ks, texel);
+    dT += lod_fade_logr(80.0, r_ks, texel) * 0.05 * sin(8.0 * phi - 80.0 * log_r + 2.6) * lod_arc_window(phi, log_r, 18.6, 1.5, r_ks, texel);
     // 2D micro-mottling (product terms — radial-dominant)
     dT += lod_fade_logr(40.0, r_ks, texel) * 0.08 * sin(5.0 * phi + 30.0 * log_r + 1.7 + tp * 2.0) *
           sin(7.0 * phi - 40.0 * log_r + 4.2 + tp * 1.5);
@@ -1025,14 +1007,14 @@ BH_FUNC inline bh_real disk_temperature_perturbation(const dvec3 &pos, bh_real r
 
     // Edge-specific: short hot arc fragments near inner edge
     const bh_real inner_prox = exp(-5.0 * r_norm * r_norm);
-    dT += lod_fade_streak(6.0, 30.0, r_ks, texel) * 0.12 * inner_prox * streak(1.0 * (phi + tp * 1.5) - 6.0 * log_r + 0.7, 30.0) * arc_window(phi, log_r, 19.7, 2.5);
-    dT += lod_fade_streak(10.0, 40.0, r_ks, texel) * 0.10 * inner_prox * streak(1.0 * (phi + tp * 1.3) - 10.0 * log_r + 2.9, 40.0) * arc_window(phi, log_r, 20.9, 3.0);
-    dT -= lod_fade_streak(14.0, 50.0, r_ks, texel) * 0.08 * inner_prox * streak(2.0 * (phi + tp * 1.1) - 14.0 * log_r + 4.4, 50.0) * arc_window(phi, log_r, 21.4, 3.5);
+    dT += lod_fade_streak(6.0, 30.0, r_ks, texel) * 0.12 * inner_prox * bh_streak_power(1.0 * (phi + tp * 1.5) - 6.0 * log_r + 0.7, 30.0) * lod_arc_window(phi, log_r, 19.7, 2.5, r_ks, texel);
+    dT += lod_fade_streak(10.0, 40.0, r_ks, texel) * 0.10 * inner_prox * bh_streak_power(1.0 * (phi + tp * 1.3) - 10.0 * log_r + 2.9, 40.0) * lod_arc_window(phi, log_r, 20.9, 3.0, r_ks, texel);
+    dT -= lod_fade_streak(14.0, 50.0, r_ks, texel) * 0.08 * inner_prox * bh_streak_power(2.0 * (phi + tp * 1.1) - 14.0 * log_r + 4.4, 50.0) * lod_arc_window(phi, log_r, 21.4, 3.5, r_ks, texel);
 
     // Outer edge: short cool concentric trailing arc fragments
     const bh_real outer_prox = exp(-5.0 * (r_norm - 1.0) * (r_norm - 1.0));
-    dT -= lod_fade_streak(4.0, 1.0, r_ks, texel) * 0.10 * outer_prox * (0.5 + 0.5 * sin(1.0 * (phi + tp) - 4.0 * log_r + 1.5)) * arc_window(phi, log_r, 22.5, 2.0);
-    dT += lod_fade_streak(7.0, 50.0, r_ks, texel) * 0.12 * outer_prox * streak(1.0 * (phi + tp) - 7.0 * log_r + 3.8, 50.0) * arc_window(phi, log_r, 23.8, 2.5);
+    dT -= lod_fade_streak(4.0, 1.0, r_ks, texel) * 0.10 * outer_prox * (0.5 + 0.5 * sin(1.0 * (phi + tp) - 4.0 * log_r + 1.5)) * lod_arc_window(phi, log_r, 22.5, 2.0, r_ks, texel);
+    dT += lod_fade_streak(7.0, 50.0, r_ks, texel) * 0.12 * outer_prox * bh_streak_power(1.0 * (phi + tp) - 7.0 * log_r + 3.8, 50.0) * lod_arc_window(phi, log_r, 23.8, 2.5, r_ks, texel);
 
     // Clamp perturbation: temperature swings ±25%
     return dclamp(1.0 + dT, 0.75, 1.25);
@@ -1083,9 +1065,9 @@ BH_FUNC inline dvec3 temperature_to_rgb(bh_real T)
 }
 
 // Emissivity + optional absorption output
-BH_FUNC inline dvec3 disk_emissivity(const dvec3 &pos, bh_real r_ks,
-                                     bh_real warped_h, bh_real *alpha_out,
-                                     const PhysicsParams &pp)
+BH_FUNC inline dvec3 disk_emissivity(BH_THREAD const dvec3 &pos, bh_real r_ks,
+                                     bh_real warped_h, BH_THREAD bh_real *alpha_out,
+                                     BH_THREAD const PhysicsParams &pp)
 {
     const bh_real rho = disk_density(pos, r_ks, warped_h, pp);
     if (alpha_out)
@@ -1145,19 +1127,8 @@ BH_FUNC inline dvec3 disk_emissivity(const dvec3 &pos, bh_real r_ks,
             const bh_real omega = 1.0 / (r_ks * sqrt(r_ks));
             const bh_real tp = pp.disk_time * omega;
 
-            auto streak_fn = [](bh_real phase, bh_real sharpness) -> bh_real
-            {
-                const bh_real s = sin(phase);
-                return bh_pow(s * s, sharpness);
-            };
-
             // LOD: fade high-frequency color terms
             const bh_real texel = compute_texel_size(pos, pp);
-
-            auto arc_win = [r_ks, texel](bh_real phi, bh_real log_r, bh_real seed, bh_real brevity) -> bh_real
-            {
-                return lod_arc_window(phi, log_r, seed, brevity, r_ks, texel);
-            };
 
             // Extended radial range for edge color
             const bh_real tex_inner = inner_r * 0.5;
@@ -1165,25 +1136,25 @@ BH_FUNC inline dvec3 disk_emissivity(const dvec3 &pos, bh_real r_ks,
             const bh_real r_ext = dclamp((r_ks - tex_inner) / (tex_outer - tex_inner), 0.0, 1.0);
 
             // Subtle large-scale concentric hue variation (arc-windowed)
-            const bh_real hue3 = sin(1.0 * (phi + tp) - 6.0 * log_r + 1.7) * arc_win(phi, log_r, 30.1, 0.5);
-            const bh_real hue4 = sin(1.0 * (phi + tp) - 10.0 * log_r + 3.2) * arc_win(phi, log_r, 31.2, 0.6);
+            const bh_real hue3 = sin(1.0 * (phi + tp) - 6.0 * log_r + 1.7) * lod_arc_window(phi, log_r, 30.1, 0.5, r_ks, texel);
+            const bh_real hue4 = sin(1.0 * (phi + tp) - 10.0 * log_r + 3.2) * lod_arc_window(phi, log_r, 31.2, 0.6, r_ks, texel);
 
             dr += cv * 0.12 * hue3;
             dg += cv * 0.08 * hue4;
 
             // Rich micro-turbulence color jitter — arc-windowed (LOD-faded)
-            dr += lod_fade_logr(16.0, r_ks, texel) * cv * 0.10 * sin(2.0 * (phi + tp) - 16.0 * log_r + 0.4) * arc_win(phi, log_r, 32.4, 0.8);
-            dg += lod_fade_logr(22.0, r_ks, texel) * cv * 0.09 * sin(3.0 * (phi + tp) - 22.0 * log_r + 5.1) * arc_win(phi, log_r, 33.1, 0.9);
-            dr += lod_fade_logr(28.0, r_ks, texel) * cv * 0.08 * sin(3.0 * (phi + tp) - 28.0 * log_r + 2.8) * arc_win(phi, log_r, 34.8, 1.0);
-            dg += lod_fade_logr(34.0, r_ks, texel) * cv * 0.08 * sin(4.0 * (phi + tp) - 34.0 * log_r + 1.3) * arc_win(phi, log_r, 35.3, 1.0);
-            db += lod_fade_logr(18.0, r_ks, texel) * cv * 0.06 * sin(2.0 * (phi + tp) - 18.0 * log_r + 4.3) * arc_win(phi, log_r, 36.3, 1.1);
-            dr -= lod_fade_logr(40.0, r_ks, texel) * cv * 0.07 * sin(4.0 * (phi + tp) - 40.0 * log_r + 3.9) * arc_win(phi, log_r, 37.9, 1.1);
-            dg += lod_fade_logr(50.0, r_ks, texel) * cv * 0.07 * sin(5.0 * (phi + tp) - 50.0 * log_r + 0.7) * arc_win(phi, log_r, 38.7, 1.2);
-            db += lod_fade_logr(55.0, r_ks, texel) * cv * 0.05 * sin(6.0 * (phi + tp) - 55.0 * log_r + 2.4) * arc_win(phi, log_r, 39.4, 1.3);
-            dr += lod_fade_logr(60.0, r_ks, texel) * cv * 0.06 * sin(6.0 * phi - 60.0 * log_r + 5.5) * arc_win(phi, log_r, 40.5, 1.3);
-            dg -= lod_fade_logr(70.0, r_ks, texel) * cv * 0.06 * sin(7.0 * phi - 70.0 * log_r + 1.1) * arc_win(phi, log_r, 41.1, 1.4);
-            db += lod_fade_logr(80.0, r_ks, texel) * cv * 0.05 * sin(8.0 * phi - 80.0 * log_r + 3.2) * arc_win(phi, log_r, 42.2, 1.4);
-            dr += lod_fade_logr(90.0, r_ks, texel) * cv * 0.05 * sin(9.0 * phi - 90.0 * log_r + 0.8) * arc_win(phi, log_r, 43.8, 1.5);
+            dr += lod_fade_logr(16.0, r_ks, texel) * cv * 0.10 * sin(2.0 * (phi + tp) - 16.0 * log_r + 0.4) * lod_arc_window(phi, log_r, 32.4, 0.8, r_ks, texel);
+            dg += lod_fade_logr(22.0, r_ks, texel) * cv * 0.09 * sin(3.0 * (phi + tp) - 22.0 * log_r + 5.1) * lod_arc_window(phi, log_r, 33.1, 0.9, r_ks, texel);
+            dr += lod_fade_logr(28.0, r_ks, texel) * cv * 0.08 * sin(3.0 * (phi + tp) - 28.0 * log_r + 2.8) * lod_arc_window(phi, log_r, 34.8, 1.0, r_ks, texel);
+            dg += lod_fade_logr(34.0, r_ks, texel) * cv * 0.08 * sin(4.0 * (phi + tp) - 34.0 * log_r + 1.3) * lod_arc_window(phi, log_r, 35.3, 1.0, r_ks, texel);
+            db += lod_fade_logr(18.0, r_ks, texel) * cv * 0.06 * sin(2.0 * (phi + tp) - 18.0 * log_r + 4.3) * lod_arc_window(phi, log_r, 36.3, 1.1, r_ks, texel);
+            dr -= lod_fade_logr(40.0, r_ks, texel) * cv * 0.07 * sin(4.0 * (phi + tp) - 40.0 * log_r + 3.9) * lod_arc_window(phi, log_r, 37.9, 1.1, r_ks, texel);
+            dg += lod_fade_logr(50.0, r_ks, texel) * cv * 0.07 * sin(5.0 * (phi + tp) - 50.0 * log_r + 0.7) * lod_arc_window(phi, log_r, 38.7, 1.2, r_ks, texel);
+            db += lod_fade_logr(55.0, r_ks, texel) * cv * 0.05 * sin(6.0 * (phi + tp) - 55.0 * log_r + 2.4) * lod_arc_window(phi, log_r, 39.4, 1.3, r_ks, texel);
+            dr += lod_fade_logr(60.0, r_ks, texel) * cv * 0.06 * sin(6.0 * phi - 60.0 * log_r + 5.5) * lod_arc_window(phi, log_r, 40.5, 1.3, r_ks, texel);
+            dg -= lod_fade_logr(70.0, r_ks, texel) * cv * 0.06 * sin(7.0 * phi - 70.0 * log_r + 1.1) * lod_arc_window(phi, log_r, 41.1, 1.4, r_ks, texel);
+            db += lod_fade_logr(80.0, r_ks, texel) * cv * 0.05 * sin(8.0 * phi - 80.0 * log_r + 3.2) * lod_arc_window(phi, log_r, 42.2, 1.4, r_ks, texel);
+            dr += lod_fade_logr(90.0, r_ks, texel) * cv * 0.05 * sin(9.0 * phi - 90.0 * log_r + 0.8) * lod_arc_window(phi, log_r, 43.8, 1.5, r_ks, texel);
 
             // 2D micro-mottling: product terms — radial-dominant (LOD-faded)
             dr += lod_fade_logr(40.0, r_ks, texel) * cv * 0.08 * sin(5.0 * phi + 30.0 * log_r + 1.7 + tp * 2.0) *
@@ -1196,20 +1167,20 @@ BH_FUNC inline dvec3 disk_emissivity(const dvec3 &pos, bh_real r_ks,
             // Inner-edge color: short arc fragments (high brevity)
             const bh_real inner_prox = exp(-5.0 * r_ext * r_ext);
             const bh_real inner_fade = lod_fade_streak(6.0, 30.0, r_ks, texel);
-            const bh_real inner_streak = streak_fn(1.0 * (phi + tp * 1.5) - 6.0 * log_r + 0.7, 30.0) * arc_win(phi, log_r, 44.7, 2.5);
+            const bh_real inner_streak = bh_streak_power(1.0 * (phi + tp * 1.5) - 6.0 * log_r + 0.7, 30.0) * lod_arc_window(phi, log_r, 44.7, 2.5, r_ks, texel);
             dg += inner_fade * cv * 0.18 * inner_prox * inner_streak;
             db += inner_fade * cv * 0.08 * inner_prox * inner_streak;
 
             // Outer-edge color: short arc fragments toward deeper red
             const bh_real outer_prox = exp(-5.0 * (r_ext - 1.0) * (r_ext - 1.0));
             const bh_real outer_fade = lod_fade_streak(4.0, 30.0, r_ks, texel);
-            const bh_real outer_streak = streak_fn(1.0 * (phi + tp) - 4.0 * log_r + 1.5, 30.0) * arc_win(phi, log_r, 45.5, 2.0);
+            const bh_real outer_streak = bh_streak_power(1.0 * (phi + tp) - 4.0 * log_r + 1.5, 30.0) * lod_arc_window(phi, log_r, 45.5, 2.0, r_ks, texel);
             dr += outer_fade * cv * 0.15 * outer_prox * outer_streak;
             dg -= outer_fade * cv * 0.10 * outer_prox * (1.0 - outer_streak);
 
             // Subtle hot-spot accents (medium arc length)
             const bh_real knot_fade = lod_fade_streak(4.0, 60.0, r_ks, texel);
-            const bh_real knot = streak_fn(1.0 * (phi + tp) - 4.0 * log_r + 2.2, 60.0) * arc_win(phi, log_r, 46.2, 1.5);
+            const bh_real knot = bh_streak_power(1.0 * (phi + tp) - 4.0 * log_r + 2.2, 60.0) * lod_arc_window(phi, log_r, 46.2, 1.5, r_ks, texel);
             const bh_real mid_prox = exp(-6.0 * (r_ext - 0.3) * (r_ext - 0.3));
             dg += knot_fade * cv * 0.15 * mid_prox * knot;
             db += knot_fade * cv * 0.07 * mid_prox * knot;
@@ -1227,9 +1198,9 @@ BH_FUNC inline dvec3 disk_emissivity(const dvec3 &pos, bh_real r_ks,
 
 // Keplerian gas 4-velocity (prograde circular orbit)
 // Takes pre-computed KS intermediates (H, lx, ly, lz) to avoid redundancy
-BH_FUNC inline dvec4 disk_gas_four_velocity(const dvec3 &pos, bh_real r_ks,
+BH_FUNC inline dvec4 disk_gas_four_velocity(BH_THREAD const dvec3 &pos, bh_real r_ks,
                                             bh_real H, bh_real lx, bh_real ly, bh_real lz,
-                                            const PhysicsParams &pp)
+                                            BH_THREAD const PhysicsParams &pp)
 {
     const bh_real inner_r = pp.disk_inner_r;
     const bh_real a = pp.bh_spin;
@@ -1310,11 +1281,11 @@ BH_FUNC inline dvec4 disk_gas_four_velocity(const dvec3 &pos, bh_real r_ks,
 // ============================================================================
 
 // Initialize ray position and velocity from camera parameters
-BH_FUNC inline void init_ray(dvec3 &pos, dvec3 &vel,
-                             const dvec3 &cam_pos,
-                             const dvec3 &cam_right,
-                             const dvec3 &cam_up,
-                             const dvec3 &cam_fwd,
+BH_FUNC inline void init_ray(BH_THREAD dvec3 &pos, BH_THREAD dvec3 &vel,
+                             BH_THREAD const dvec3 &cam_pos,
+                             BH_THREAD const dvec3 &cam_right,
+                             BH_THREAD const dvec3 &cam_up,
+                             BH_THREAD const dvec3 &cam_fwd,
                              bh_real sub_x, bh_real sub_y,
                              bh_real fov_x, bh_real fov_y)
 {
@@ -1331,8 +1302,8 @@ BH_FUNC inline void init_ray(dvec3 &pos, dvec3 &vel,
 }
 
 // RK2 (far-field) / RK4 (near-field) geodesic integrator
-BH_FUNC inline bool advance_ray(dvec3 &pos, dvec3 &vel, bh_real &cached_r,
-                                bh_real dt, const PhysicsParams &pp)
+BH_FUNC inline bool advance_ray(BH_THREAD dvec3 &pos, BH_THREAD dvec3 &vel, BH_THREAD bh_real &cached_r,
+                                bh_real dt, BH_THREAD const PhysicsParams &pp)
 {
     const bh_real r_plus = pp.r_plus;
 
@@ -1398,9 +1369,9 @@ BH_FUNC inline bool advance_ray(dvec3 &pos, dvec3 &vel, bh_real &cached_r,
 
 // Volumetric disk sampling with relativistic radiative transfer
 // r_ks is the precomputed Kerr-Schild radius (avoids redundant ks_radius call)
-BH_FUNC inline void sample_disk_volume(const dvec3 &pos, const dvec3 &vel, bh_real ds,
-                                       dvec3 &acc_color, bh_real &acc_opacity,
-                                       bh_real r_ks, const PhysicsParams &pp)
+BH_FUNC inline void sample_disk_volume(BH_THREAD const dvec3 &pos, BH_THREAD const dvec3 &vel, bh_real ds,
+                                       BH_THREAD dvec3 &acc_color, BH_THREAD bh_real &acc_opacity,
+                                       bh_real r_ks, BH_THREAD const PhysicsParams &pp)
 {
     if (acc_opacity >= 0.999)
         return;
@@ -1412,7 +1383,7 @@ BH_FUNC inline void sample_disk_volume(const dvec3 &pos, const dvec3 &vel, bh_re
         return;
 
     const bh_real warped_h = disk_warped_half_thickness(pos, r_ks, pp);
-    if (fabs(pos.y) > 3.0 * warped_h)
+    if (bh_fabs(pos.y) > 3.0 * warped_h)
         return;
 
     // Emissivity + absorption
@@ -1459,7 +1430,7 @@ BH_FUNC inline void sample_disk_volume(const dvec3 &pos, const dvec3 &vel, bh_re
 
     bh_real k_dot_u = k_lower0 * gas_u.t + k_lower1 * gas_u.x +
                       k_lower2 * gas_u.y + k_lower3 * gas_u.z;
-    if (fabs(k_dot_u) < 1e-15)
+    if (bh_fabs(k_dot_u) < 1e-15)
         k_dot_u = 1e-15;
 
     const bh_real g_red = -k_lower0 / k_dot_u;
@@ -1489,8 +1460,10 @@ BH_FUNC inline void sample_disk_volume(const dvec3 &pos, const dvec3 &vel, bh_re
 }
 
 // ============================================================================
-// Convenience: construct PhysicsParams from scene parameters
+// Convenience: construct PhysicsParams from scene parameters (host only)
 // ============================================================================
+
+#ifndef __METAL_VERSION__
 
 inline PhysicsParams make_physics_params(bh_real M, bh_real a,
                                          bh_real disk_outer_r, bh_real disk_thickness,
@@ -1520,5 +1493,7 @@ inline PhysicsParams make_physics_params(bh_real M, bh_real a,
     pp.disk_flat_mode = flat_mode;
     return pp;
 }
+
+#endif // !__METAL_VERSION__
 
 #endif // _BH_PHYSICS_H
