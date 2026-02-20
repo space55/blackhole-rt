@@ -14,7 +14,7 @@ A physically-based Kerr black hole ray tracer that renders images of spinning bl
 - **Multi-format output** — TGA, JPEG, Radiance HDR, and OpenEXR (float32, multi-layer)
 - **Log tonemap** — configurable compression for cinematic look
 - **Anti-aliasing** — NxN stratified supersampling (up to 16spp)
-- **GPU acceleration** — optional CUDA backend for NVIDIA GPUs
+- **GPU acceleration** — optional CUDA backend for NVIDIA GPUs, or Metal backend for Apple Silicon Macs
 - **Compile-time precision** — switchable fp64 (reference quality) / fp32 (fast GPU) via `USE_FLOAT`
 - **LOD anti-aliasing** — procedural textures fade smoothly based on texel-to-pixel ratio, eliminating moiré and shimmer at all distances
 - **CPU parallelism** — OpenMP for multi-core rendering
@@ -35,7 +35,8 @@ A physically-based Kerr black hole ray tracer that renders images of spinning bl
 
 - **OpenMP** — multi-threaded CPU rendering (strongly recommended)
 - **OpenEXR 3** — for `.exr` output with separate disk/sky/alpha layers
-- **CUDA toolkit** — for GPU-accelerated rendering
+- **CUDA toolkit** — for GPU-accelerated rendering (NVIDIA GPUs)
+- **Xcode** — for Metal GPU-accelerated rendering (Apple Silicon / macOS)
 
 ### macOS (Homebrew)
 
@@ -63,16 +64,24 @@ The binary `bhrt3` will be created in the `build/` directory.
 
 | Option             | Default   | Description                                                                         |
 | ------------------ | --------- | ----------------------------------------------------------------------------------- |
-| `USE_GPU`          | `OFF`     | Enable CUDA GPU acceleration                                                        |
+| `USE_GPU`          | `OFF`     | Enable CUDA GPU acceleration (NVIDIA)                                               |
+| `USE_METAL`        | `OFF`     | Enable Metal GPU acceleration (Apple Silicon / macOS)                               |
 | `USE_FLOAT`        | `OFF`     | Use fp32 instead of fp64 for all physics (~2× faster on GPU, 32× on consumer cards) |
 | `CMAKE_BUILD_TYPE` | `Release` | `Release` for optimised, `Debug` for debugging                                      |
 
+> `USE_GPU` and `USE_METAL` are mutually exclusive — enable only one at a time.
+
 ```bash
-# GPU build (requires CUDA toolkit)
+# CUDA GPU build (requires CUDA toolkit)
 cmake .. -DUSE_GPU=ON
 
-# GPU + single-precision (fastest on consumer GPUs)
+# CUDA GPU + single-precision (fastest on consumer GPUs)
 cmake .. -DUSE_GPU=ON -DUSE_FLOAT=ON
+
+# Metal GPU build (macOS — requires Xcode with metal compiler)
+mkdir -p build-metal && cd build-metal
+cmake .. -DUSE_METAL=ON
+cmake --build . -j
 
 # Debug build
 cmake .. -DCMAKE_BUILD_TYPE=Debug
@@ -240,17 +249,34 @@ For rendering across multiple machines, see [slurm/README.md](slurm/README.md).
 
 ## GPU Rendering
 
-The optional CUDA backend uses a persistent-thread work-stealing design:
+Both GPU backends use a persistent-thread work-stealing design:
 
-- Fixed thread pool (`SM_count × 2` blocks of 256 threads)
 - Global atomic work counter distributes pixels dynamically
 - Threads that finish cheap sky pixels immediately pick up new work
 - Eliminates the "tail-end" stall from uneven per-pixel cost
-- Live progress reporting via zero-copy mapped pinned memory
+- Live progress reporting (CUDA: zero-copy pinned memory; Metal: shared MTLBuffer polling)
 
-Physics code in `physics.h` is shared between CPU and GPU via the `BH_FUNC` macro (`__host__ __device__` under nvcc, empty otherwise).
+Physics code in `physics.h` is shared across CPU, CUDA, and Metal via the `BH_FUNC` macro (`__host__ __device__` under nvcc, empty otherwise). The `BH_THREAD` macro handles Metal Shading Language's address space qualifiers transparently.
+
+### CUDA (NVIDIA GPUs)
+
+Requires the CUDA toolkit. Build with `cmake .. -DUSE_GPU=ON`.
 
 When `USE_FLOAT=ON`, all physics computation uses `float` instead of `double`. On consumer NVIDIA GPUs (GeForce), this can be **32× faster** because fp64 throughput is heavily throttled. On datacenter GPUs (A100, H100) the speedup is ~2×. There is a slight loss of accuracy near the photon sphere.
+
+### Metal (Apple Silicon / macOS)
+
+Requires Xcode (the full IDE install — Command Line Tools alone do not include the `metal` shader compiler). Build with:
+
+```bash
+mkdir -p build-metal && cd build-metal
+cmake .. -DUSE_METAL=ON
+cmake --build . -j
+```
+
+Metal always uses fp32 (`BH_USE_FLOAT` is forced on) because Apple Silicon has no fp64 compute capability. The Metal shader (`.metal` → `.air` → `.metallib`) is compiled as part of the CMake build. At runtime, `bhrt3` loads `metal_render.metallib` from the working directory or the default Metal library.
+
+> **Tip:** Use a separate build directory (`build-metal/`) so you can switch between CPU and Metal builds without reconfiguring.
 
 ## Post-Processing Pipeline
 
@@ -334,9 +360,12 @@ The [slurm/](slurm/) directory contains scripts for distributing frame renders a
 │   ├── scene.cpp           # Scene file parser
 │   ├── sky.cpp             # Sky image loader
 │   └── stb_impl.cpp        # stb library implementations
-├── gpu/                    # CUDA GPU backend
-│   ├── gpu_render.cu       # GPU render kernel (persistent-thread work-stealing)
-│   └── gpu_render.h        # GPU interface and scene param struct
+├── gpu/                    # GPU backends (CUDA + Metal)
+│   ├── gpu_render.cu       # CUDA render kernel (persistent-thread work-stealing)
+│   ├── gpu_render.h        # GPU interface and scene param struct
+│   ├── metal_render.metal  # Metal compute kernel (shared physics via physics.h)
+│   ├── metal_render.mm     # Metal host launch code (Objective-C++)
+│   └── metal_render.h      # Metal interface header
 ├── lib/                    # Third-party libraries (header-only)
 │   ├── stb_image.h         # Image loading
 │   └── stb_image_write.h   # Image writing (TGA, HDR, JPEG)

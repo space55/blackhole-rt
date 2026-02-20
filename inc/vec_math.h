@@ -12,7 +12,12 @@
 #ifndef _BH_VEC_MATH_H
 #define _BH_VEC_MATH_H
 
+#ifdef __METAL_VERSION__
+#include <metal_stdlib>
+using namespace metal;
+#else
 #include <math.h>
+#endif
 
 #ifndef M_PI
 #define M_PI 3.141592653589793238462643383279
@@ -20,8 +25,19 @@
 
 #ifdef __CUDACC__
 #define BH_FUNC __host__ __device__
+#elif defined(__METAL_VERSION__)
+#define BH_FUNC
 #else
 #define BH_FUNC
+#endif
+
+// Metal Shading Language requires explicit address space qualifiers on all
+// reference and pointer types.  All physics data lives in the thread (local)
+// address space — BH_THREAD expands to `thread` under Metal, empty otherwise.
+#ifdef __METAL_VERSION__
+#define BH_THREAD thread
+#else
+#define BH_THREAD
 #endif
 
 // ============================================================================
@@ -68,8 +84,30 @@ BH_FUNC inline bool bh_isfinite(bh_real x)
     unsigned long long bits = __double_as_longlong(x);
     return ((bits >> 52) & 0x7FFull) != 0x7FFull;
 #endif
+#elif defined(__METAL_VERSION__)
+    return metal::isfinite(x);
 #else
     return (x == x) && (x - x == bh_real(0));
+#endif
+}
+
+// cbrt: Metal Shading Language has no cbrt — use pow(x, 1/3) with sign handling
+BH_FUNC inline bh_real bh_cbrt(bh_real x)
+{
+#ifdef __METAL_VERSION__
+    return (x >= 0.0) ? pow(x, bh_real(1.0 / 3.0)) : -pow(-x, bh_real(1.0 / 3.0));
+#else
+    return cbrt(x);
+#endif
+}
+
+// fabs: Metal uses metal::abs for floating-point types
+BH_FUNC inline bh_real bh_fabs(bh_real x)
+{
+#ifdef __METAL_VERSION__
+    return metal::abs(x);
+#else
+    return fabs(x);
 #endif
 }
 
@@ -84,8 +122,8 @@ struct dvec3
     BH_FUNC dvec3() : x(0), y(0), z(0) {}
     BH_FUNC dvec3(bh_real x_, bh_real y_, bh_real z_) : x(x_), y(y_), z(z_) {}
 
-    BH_FUNC dvec3 operator+(const dvec3 &b) const { return {x + b.x, y + b.y, z + b.z}; }
-    BH_FUNC dvec3 operator-(const dvec3 &b) const { return {x - b.x, y - b.y, z - b.z}; }
+    BH_FUNC dvec3 operator+(BH_THREAD const dvec3 &b) const { return {x + b.x, y + b.y, z + b.z}; }
+    BH_FUNC dvec3 operator-(BH_THREAD const dvec3 &b) const { return {x - b.x, y - b.y, z - b.z}; }
     BH_FUNC dvec3 operator*(bh_real s) const { return {x * s, y * s, z * s}; }
     BH_FUNC dvec3 operator/(bh_real s) const
     {
@@ -93,21 +131,21 @@ struct dvec3
         return {x * inv, y * inv, z * inv};
     }
 
-    BH_FUNC dvec3 &operator+=(const dvec3 &b)
+    BH_FUNC BH_THREAD dvec3 &operator+=(BH_THREAD const dvec3 &b)
     {
         x += b.x;
         y += b.y;
         z += b.z;
         return *this;
     }
-    BH_FUNC dvec3 &operator-=(const dvec3 &b)
+    BH_FUNC BH_THREAD dvec3 &operator-=(BH_THREAD const dvec3 &b)
     {
         x -= b.x;
         y -= b.y;
         z -= b.z;
         return *this;
     }
-    BH_FUNC dvec3 &operator*=(bh_real s)
+    BH_FUNC BH_THREAD dvec3 &operator*=(bh_real s)
     {
         x *= s;
         y *= s;
@@ -115,8 +153,8 @@ struct dvec3
         return *this;
     }
 
-    BH_FUNC bh_real dot(const dvec3 &b) const { return x * b.x + y * b.y + z * b.z; }
-    BH_FUNC dvec3 cross(const dvec3 &b) const
+    BH_FUNC bh_real dot(BH_THREAD const dvec3 &b) const { return x * b.x + y * b.y + z * b.z; }
+    BH_FUNC dvec3 cross(BH_THREAD const dvec3 &b) const
     {
         return {y * b.z - z * b.y, z * b.x - x * b.z, x * b.y - y * b.x};
     }
@@ -131,7 +169,7 @@ struct dvec3
     BH_FUNC dvec3 cwiseMin(bh_real v) const { return {fmin(x, v), fmin(y, v), fmin(z, v)}; }
 };
 
-BH_FUNC inline dvec3 operator*(bh_real s, const dvec3 &v) { return {s * v.x, s * v.y, s * v.z}; }
+BH_FUNC inline dvec3 operator*(bh_real s, BH_THREAD const dvec3 &v) { return {s * v.x, s * v.y, s * v.z}; }
 
 // ============================================================================
 // dvec4 -- 4-component vector (t, x, y, z)
@@ -167,11 +205,11 @@ struct dmat3
     }
 
     BH_FUNC bh_real operator()(int row, int col) const { return m[col * 3 + row]; }
-    BH_FUNC bh_real &operator()(int row, int col) { return m[col * 3 + row]; }
+    BH_FUNC BH_THREAD bh_real &operator()(int row, int col) { return m[col * 3 + row]; }
 
     BH_FUNC dvec3 col(int c) const { return {m[c * 3], m[c * 3 + 1], m[c * 3 + 2]}; }
 
-    BH_FUNC dvec3 operator*(const dvec3 &v) const
+    BH_FUNC dvec3 operator*(BH_THREAD const dvec3 &v) const
     {
         return {
             m[0] * v.x + m[3] * v.y + m[6] * v.z,
@@ -179,7 +217,7 @@ struct dmat3
             m[2] * v.x + m[5] * v.y + m[8] * v.z};
     }
 
-    BH_FUNC dmat3 operator*(const dmat3 &b) const
+    BH_FUNC dmat3 operator*(BH_THREAD const dmat3 &b) const
     {
         dmat3 r;
         for (int c = 0; c < 3; ++c)

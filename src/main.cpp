@@ -24,6 +24,10 @@
 #include "gpu_render.h"
 #endif
 
+#ifdef USE_METAL
+#include "metal_render.h"
+#endif
+
 int main(int argc, char *argv[])
 {
     // --- Load scene config ------------------------------------------------
@@ -152,6 +156,47 @@ int main(int argc, char *argv[])
         }
 
         // --- CPU sky mapping from GPU results ---
+        printf("Mapping sky on CPU...\n");
+#pragma omp parallel for schedule(dynamic, 64)
+        for (int i = 0; i < (int)num_pixels; i++)
+        {
+            hdr_disk[i] = dvec3(gpu_results[i].disk_r,
+                                gpu_results[i].disk_g,
+                                gpu_results[i].disk_b);
+            hdr_alpha[i] = 1.0 - (bh_real)gpu_results[i].sky_weight;
+
+            if (gpu_results[i].sky_weight > 1e-6f)
+            {
+                dvec3 exit_dir(gpu_results[i].exit_vx,
+                               gpu_results[i].exit_vy,
+                               gpu_results[i].exit_vz);
+                if (exit_dir.squaredNorm() > 1e-24)
+                {
+                    dvec3 sky_color = sample_sky(*image, exit_dir, sky_rot,
+                                                 cfg.sky_offset_u, cfg.sky_offset_v);
+                    hdr_sky[i] = sky_color *
+                                 (bh_real)gpu_results[i].sky_weight;
+                }
+            }
+        }
+    }
+#elif defined(USE_METAL)
+    // =================================================================
+    // Metal render path: physics on GPU, sky mapping + post-proc on CPU
+    // =================================================================
+    {
+        GPUSceneParams gpu_params;
+        fill_gpu_params(gpu_params, cfg, pp, cam_rot_matrix);
+
+        // Launch Metal render
+        std::vector<GPUPixelResult> gpu_results(num_pixels);
+        if (!metal_gpu_render(gpu_params, gpu_results.data()))
+        {
+            printf("Metal render failed!\n");
+            return 1;
+        }
+
+        // --- CPU sky mapping from Metal results ---
         printf("Mapping sky on CPU...\n");
 #pragma omp parallel for schedule(dynamic, 64)
         for (int i = 0; i < (int)num_pixels; i++)
@@ -352,7 +397,7 @@ int main(int argc, char *argv[])
     }
 
     printf("Disk samples accumulated: %d\n", disk_samples.load());
-#endif // USE_GPU
+#endif // USE_GPU / USE_METAL
 
     {
         auto now = std::chrono::steady_clock::now();

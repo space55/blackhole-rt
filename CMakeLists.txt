@@ -10,6 +10,14 @@ endif()
 # GPU acceleration via CUDA (off by default)
 option(USE_GPU "Build with CUDA GPU acceleration" OFF)
 
+# GPU acceleration via Metal (macOS / Apple Silicon)
+option(USE_METAL "Build with Metal GPU acceleration (macOS)" OFF)
+
+# Mutual exclusion: CUDA and Metal cannot both be active
+if(USE_GPU AND USE_METAL)
+    message(FATAL_ERROR "USE_GPU (CUDA) and USE_METAL cannot both be enabled")
+endif()
+
 # Single-precision mode: use float instead of double for all ray integration
 # and physics.  ~2x faster on GPU (32x on consumer cards), slightly less
 # accurate near the photon sphere.  Compare with the fp64 default.
@@ -22,6 +30,10 @@ if(USE_GPU)
     if(NOT DEFINED CMAKE_CUDA_ARCHITECTURES)
         set(CMAKE_CUDA_ARCHITECTURES "70;80;89")
     endif()
+elseif(USE_METAL)
+    project(bhrt3 LANGUAGES CXX OBJCXX)
+    enable_language(OBJCXX)
+    set(CMAKE_OBJCXX_STANDARD 20)
 else()
     project(bhrt3 LANGUAGES CXX)
 endif()
@@ -63,6 +75,10 @@ if(USE_GPU)
     list(APPEND SOURCES gpu/gpu_render.cu)
 endif()
 
+if(USE_METAL)
+    list(APPEND SOURCES gpu/metal_render.mm)
+endif()
+
 add_executable(${PROJECT_NAME} ${SOURCES})
 
 target_include_directories(${PROJECT_NAME} PRIVATE "inc/")
@@ -75,6 +91,66 @@ if(USE_GPU)
     # --expt-relaxed-constexpr allows constexpr host functions (<cmath>) in
     # device code — safety net for any residual mixed-type math calls.
     target_compile_options(${PROJECT_NAME} PRIVATE $<$<COMPILE_LANGUAGE:CUDA>:--use_fast_math -lineinfo>)
+endif()
+
+if(USE_METAL)
+    target_compile_definitions(${PROJECT_NAME} PRIVATE USE_METAL BH_USE_FLOAT)
+    # Link Metal and Foundation frameworks
+    target_link_libraries(${PROJECT_NAME} "-framework Metal" "-framework Foundation")
+    # ObjC++ flags for the .mm file
+    set_source_files_properties(gpu/metal_render.mm PROPERTIES
+        COMPILE_FLAGS "-fobjc-arc"
+    )
+    # Compile .metal shader to .metallib at build time
+    # Requires full Xcode (not just Command Line Tools) for the Metal compiler.
+    find_program(METAL_COMPILER xcrun)
+    set(METAL_SOURCE "${CMAKE_SOURCE_DIR}/gpu/metal_render.metal")
+    set(METAL_AIR "${CMAKE_BINARY_DIR}/metal_render.air")
+    set(METAL_LIB "${CMAKE_BINARY_DIR}/metal_render.metallib")
+    if(METAL_COMPILER)
+        # Test if the metal compiler is actually available
+        execute_process(
+            COMMAND xcrun --find metal
+            RESULT_VARIABLE METAL_FOUND
+            OUTPUT_QUIET ERROR_QUIET
+        )
+    endif()
+    if(METAL_COMPILER AND METAL_FOUND EQUAL 0)
+        add_custom_command(
+            OUTPUT ${METAL_AIR}
+            COMMAND xcrun -sdk macosx metal
+                -c ${METAL_SOURCE}
+                -o ${METAL_AIR}
+                -I ${CMAKE_SOURCE_DIR}/inc
+                -I ${CMAKE_SOURCE_DIR}
+                -std=metal3.0
+                -O2
+                -DBH_USE_FLOAT
+            DEPENDS ${METAL_SOURCE}
+                ${CMAKE_SOURCE_DIR}/inc/physics.h
+                ${CMAKE_SOURCE_DIR}/inc/vec_math.h
+            COMMENT "Compiling Metal shader → .air"
+        )
+        add_custom_command(
+            OUTPUT ${METAL_LIB}
+            COMMAND xcrun -sdk macosx metallib
+                ${METAL_AIR}
+                -o ${METAL_LIB}
+            DEPENDS ${METAL_AIR}
+            COMMENT "Linking Metal shader → .metallib"
+        )
+        add_custom_target(metal_shaders ALL DEPENDS ${METAL_LIB})
+        add_dependencies(${PROJECT_NAME} metal_shaders)
+    else()
+        message(WARNING "Metal compiler not found (install full Xcode). "
+                        "The C++ host code will build but you must compile "
+                        "metal_render.metal manually:\n"
+                        "  xcrun -sdk macosx metal -c gpu/metal_render.metal "
+                        "-o build/metal_render.air -I inc -std=metal3.0 -O2 -DBH_USE_FLOAT\n"
+                        "  xcrun -sdk macosx metallib build/metal_render.air "
+                        "-o build/metal_render.metallib")
+    endif()
+    message(STATUS "Metal GPU acceleration enabled (fp32 forced)")
 endif()
 
 if(USE_FLOAT)
