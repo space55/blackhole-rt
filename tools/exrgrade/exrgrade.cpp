@@ -132,7 +132,8 @@ int main(int argc, char *argv[])
     // Helper: parse "-flag=value" or "-flag value" for numeric options.
     // Returns the float value, advancing i if the value is in the next arg.
     // Sets ok=true on success, ok=false if no value found.
-    auto parse_flag_float = [&](int &i, const char *flag, bool &ok) -> float {
+    auto parse_flag_float = [&](int &i, const char *flag, bool &ok) -> float
+    {
         const char *arg = argv[i];
         size_t flag_len = strlen(flag);
         if (strncmp(arg, flag, flag_len) == 0 && arg[flag_len] == '=')
@@ -161,19 +162,31 @@ int main(int argc, char *argv[])
         {
             bool ok;
             exposure = parse_flag_float(i, "-exposure", ok);
-            if (!ok) { fprintf(stderr, "Error: -exposure requires a value\n"); return 1; }
+            if (!ok)
+            {
+                fprintf(stderr, "Error: -exposure requires a value\n");
+                return 1;
+            }
         }
         else if (a.rfind("-tonemap", 0) == 0)
         {
             bool ok;
             tonemap_compression = parse_flag_float(i, "-tonemap", ok);
-            if (!ok) { fprintf(stderr, "Error: -tonemap requires a value\n"); return 1; }
+            if (!ok)
+            {
+                fprintf(stderr, "Error: -tonemap requires a value\n");
+                return 1;
+            }
         }
         else if (a.rfind("-gamma", 0) == 0)
         {
             bool ok;
             gamma_val = parse_flag_float(i, "-gamma", ok);
-            if (!ok) { fprintf(stderr, "Error: -gamma requires a value\n"); return 1; }
+            if (!ok)
+            {
+                fprintf(stderr, "Error: -gamma requires a value\n");
+                return 1;
+            }
         }
         else if (a == "-list")
         {
