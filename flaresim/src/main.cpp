@@ -435,10 +435,11 @@ static bool save_exr(const char *path, const EXRImage &img,
         for (auto &ch : img.channels)
             header.channels().insert(ch.name.c_str(), Imf::Channel(Imf::FLOAT));
 
-        // Flare layers
+        // Flare layers (additive: alpha = 0 so "over" compositing = add)
         header.channels().insert("flare.R", Imf::Channel(Imf::FLOAT));
         header.channels().insert("flare.G", Imf::Channel(Imf::FLOAT));
         header.channels().insert("flare.B", Imf::Channel(Imf::FLOAT));
+        header.channels().insert("flare.A", Imf::Channel(Imf::FLOAT));
 
         // Bloom layers
         bool has_bloom = (bloom_r && bloom_g && bloom_b);
@@ -447,7 +448,11 @@ static bool save_exr(const char *path, const EXRImage &img,
             header.channels().insert("bloom.R", Imf::Channel(Imf::FLOAT));
             header.channels().insert("bloom.G", Imf::Channel(Imf::FLOAT));
             header.channels().insert("bloom.B", Imf::Channel(Imf::FLOAT));
+            header.channels().insert("bloom.A", Imf::Channel(Imf::FLOAT));
         }
+
+        // Zero alpha buffer for additive layers
+        std::vector<float> zero_alpha(img.num_pixels(), 0.0f);
 
         Imf::FrameBuffer fb;
 
@@ -469,6 +474,9 @@ static bool save_exr(const char *path, const EXRImage &img,
         fb.insert("flare.B",
                   Imf::Slice(Imf::FLOAT, (char *)flare_b,
                              sizeof(float), sizeof(float) * img.width));
+        fb.insert("flare.A",
+                  Imf::Slice(Imf::FLOAT, (char *)zero_alpha.data(),
+                             sizeof(float), sizeof(float) * img.width));
 
         if (has_bloom)
         {
@@ -481,14 +489,17 @@ static bool save_exr(const char *path, const EXRImage &img,
             fb.insert("bloom.B",
                       Imf::Slice(Imf::FLOAT, (char *)bloom_b,
                                  sizeof(float), sizeof(float) * img.width));
+            fb.insert("bloom.A",
+                      Imf::Slice(Imf::FLOAT, (char *)zero_alpha.data(),
+                                 sizeof(float), sizeof(float) * img.width));
         }
 
         Imf::OutputFile file(path, header);
         file.setFrameBuffer(fb);
         file.writePixels(img.height);
 
-        printf("Wrote EXR: %s (original layers + flare.R/G/B%s)\n", path,
-               has_bloom ? " + bloom.R/G/B" : "");
+        printf("Wrote EXR: %s (original layers + flare.RGBA%s)\n", path,
+               has_bloom ? " + bloom.RGBA" : "");
         return true;
     }
     catch (const std::exception &e)
